@@ -1,0 +1,27 @@
+  services:
+    recommender-api:
+      build:
+        context: ./recommender-app
+        dockerfile: Dockerfile
+      container_name: recommender-api
+      ports:
+        - 8000:8000
+      env_file:
+        - .env
+      environment:
+        - PYTHONUNBUFFERED=1
+      restart: unless-stopped
+      networks:
+        - default
+        - dokploy-network
+      labels:
+        - traefik.enable=true
+        - traefik.http.routers.recommender.rule=Host(`recommender.smbtelkompurwokerto.shop`)
+        - traefik.http.services.recommender.loadbalancer.server.port=8000
+        - traefik.http.routers.recommender.entrypoints=websecure
+        - traefik.http.routers.recommender.tls.certresolver=letsencrypt
+        - traefik.docker.network=dokploy-network
+
+  networks:
+    dokploy-network:
+      external: true
