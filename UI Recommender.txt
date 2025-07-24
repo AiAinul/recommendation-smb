@@ -1,0 +1,95 @@
+<script>
+(function () {
+  //CSS
+  var swiperCSS = document.createElement('link');
+  swiperCSS.rel = 'stylesheet';
+  swiperCSS.href = 'https://cdn.jsdelivr.net/npm/swiper@11/swiper-bundle.min.css';
+  document.head.appendChild(swiperCSS);
+
+  //Container
+  var container = document.querySelector(".recommendation-swiper");
+  if (!container) {
+    container = document.createElement("div");
+    container.className = "swiper recommendation-swiper";
+
+    container.innerHTML = ''
+      + '<div class="swiper-wrapper"></div>'
+      + '<div class="swiper-button-prev"></div>'
+      + '<div class="swiper-button-next"></div>';
+
+    document.body.appendChild(container);
+  }
+
+  //style
+  var style = document.createElement("style");
+  style.innerHTML =
+    '.recommendation-swiper { margin: 40px 20px; }' +
+    '@media (min-width: 1024px) {' +
+    '.recommendation-swiper { margin: 40px 300px; }' +
+    '}' +
+    '.rec-card { background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.1); display: flex; flex-direction: column; height: 100%; }' +
+    '.rec-card img { width: 100%; height: 400px; object-fit: cover; }' +
+    '.rec-content { padding: 16px; flex-grow: 1; display: flex; flex-direction: column; justify-content: space-between; }' +
+    '.rec-content h4 { font-size: 18px; margin: 0 0 10px; line-height: 1.4; min-height: 48px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; text-overflow: ellipsis; }' +
+    '.rec-meta { font-size: 14px; color: #555; }' +
+    '.swiper-button-prev, .swiper-button-next { color: #333; }';
+  document.head.appendChild(style);
+
+  //window
+  function renderSwiper() {
+    var data = window.telkomRecommendations;
+    if (!data || !data.length) return;
+
+    var wrapper = container.querySelector(".swiper-wrapper");
+    if (!wrapper) return;
+
+    wrapper.innerHTML = "";
+
+    for (var i = 0; i < data.length; i++) {
+      var rec = data[i];
+      var slide = document.createElement("div");
+      slide.className = "swiper-slide";
+
+      var html = ''
+        + '<a href="' + rec.page_url + '" style="text-decoration: none; color: inherit;">'
+        + '<div class="rec-card">'
+        +   '<img src="' + rec.image_url + '" alt="' + rec.item_id + '" />'
+        +   '<div class="rec-content">'
+        +     '<h4>' + rec.tittle + '<br>Kampus ' + rec.kampus + '</h4>'
+        +     '<div class="rec-meta"><span></span></div>'
+        +   '</div>'
+        + '</div>'
+        + '</a>';
+
+      slide.innerHTML = html;
+      wrapper.appendChild(slide);
+    }
+
+    //Load Swiper
+    var swiperScript = document.createElement("script");
+    swiperScript.src = "https://cdn.jsdelivr.net/npm/swiper@11/swiper-bundle.min.js";
+    swiperScript.onload = function () {
+      new Swiper(".recommendation-swiper", {
+        slidesPerView: 1,
+        spaceBetween: 20,
+        navigation: {
+          nextEl: ".swiper-button-next",
+          prevEl: ".swiper-button-prev"
+        },
+        breakpoints: {
+          768: { slidesPerView: 3 }
+        }
+      });
+    };
+    document.body.appendChild(swiperScript);
+  }
+
+  //wait window
+  var waitForData = setInterval(function () {
+    if (window.telkomRecommendations && window.telkomRecommendations.length > 0) {
+      clearInterval(waitForData);
+      renderSwiper();
+    }
+  }, 300);
+})();
+</script>

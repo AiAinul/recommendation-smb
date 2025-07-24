@@ -16,6 +16,8 @@ import time
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.responses import RedirectResponse
 import secrets
+import uuid
+import requests
 
 from data_processing import DataProcessor
 from model import RecommendationModel
@@ -29,7 +31,7 @@ os.environ['TF_USE_LEGACY_KERAS'] = '1'
 data_processor = DataProcessor()
 program_studi_df = None
 
-def enrich_recommendations_with_program_studi(recommendations):
+def enrich_recommendations_with_program_studi(recommendations, recommendation_id=None):
     global program_studi_df
     if program_studi_df is None:
         # Load the full program studi data (not just selected_cols)
@@ -43,7 +45,14 @@ def enrich_recommendations_with_program_studi(recommendations):
         extra = program_studi_lookup.get(item_id, {})
         rec = rec.copy()
         rec["tittle"] = extra.get("tittle")
-        rec["page_url"] = extra.get("page_url")
+        page_url = extra.get("page_url")
+        if page_url and recommendation_id:
+            if "?" in page_url:
+                rec["page_url"] = f"{page_url}&recommendationid={recommendation_id}"
+            else:
+                rec["page_url"] = f"{page_url}?recommendationid={recommendation_id}"
+        else:
+            rec["page_url"] = page_url
         rec["image_url"] = extra.get("image_url")
         rec["kampus"] = extra.get("kampus")
         enriched.append(rec)
@@ -794,7 +803,9 @@ async def get_recommendations(request: RecommendationRequest, _request: Request)
             top_k=request.top_k
         )
         # Enrich recommendations with tittle, page_url, image_url
-        recommendations = enrich_recommendations_with_program_studi(recommendations)
+        recommendation_id = str(uuid.uuid4())
+        recommendation_group = [rec.get("item_id") for rec in recommendations]
+        recommendations = enrich_recommendations_with_program_studi(recommendations, recommendation_id)
         
         # Track recommendation metrics
         recommendation_metrics["total_recommendations"] += 1
@@ -822,7 +833,8 @@ async def get_recommendations(request: RecommendationRequest, _request: Request)
         if training_status["is_training"] and not training_status["training_completed"]:
             model_status = f"{model_type} (training in progress - {training_status['current_step']})"
         
-        return RecommendationResponse(
+        recommendation_id = str(uuid.uuid4())
+        response_data = RecommendationResponse(
             user_id=request.user_id,
             current_item_id=request.current_item_id,
             recommendations=recommendations,
@@ -837,6 +849,17 @@ async def get_recommendations(request: RecommendationRequest, _request: Request)
                 "message": f"Using {model_type} model instance in memory" + (" (during training)" if training_status["is_training"] else "")
             }
         )
+        response_dict = response_data.dict()
+        response_dict["recommendation_id"] = recommendation_id
+        response_dict["recommendation_group"] = recommendation_group
+        # Send to Google Apps Script (non-blocking)
+        try:
+            GOOGLE_SCRIPT_URL = os.environ.get("RECOMMENDATION_URL")
+            if GOOGLE_SCRIPT_URL:
+                requests.post(GOOGLE_SCRIPT_URL, json=response_dict, timeout=3)
+        except Exception as log_exc:
+            print(f"[LOGGING ERROR] Failed to log recommendation: {log_exc}")
+        return response_dict
     except Exception as e:
         print(f"❌ Error in recommendations: {e}")
         import traceback
@@ -886,7 +909,9 @@ async def get_recommendations_with_ranking(request: RecommendationRequest, _requ
             top_k=request.top_k
         )
         # Enrich recommendations with tittle, page_url, image_url
-        recommendations = enrich_recommendations_with_program_studi(recommendations)
+        recommendation_id = str(uuid.uuid4())
+        recommendation_group = [rec.get("item_id") for rec in recommendations]
+        recommendations = enrich_recommendations_with_program_studi(recommendations, recommendation_id)
         
         # Track recommendation metrics
         recommendation_metrics["total_recommendations"] += 1
@@ -914,7 +939,8 @@ async def get_recommendations_with_ranking(request: RecommendationRequest, _requ
         if training_status["is_training"] and not training_status["training_completed"]:
             model_status = f"{model_type} (training in progress - {training_status['current_step']})"
         
-        return RecommendationResponse(
+        recommendation_id = str(uuid.uuid4())
+        response_data = RecommendationResponse(
             user_id=request.user_id,
             current_item_id=request.current_item_id,
             recommendations=recommendations,
@@ -930,6 +956,17 @@ async def get_recommendations_with_ranking(request: RecommendationRequest, _requ
                 "method": "retrieval_with_ranking"
             }
         )
+        response_dict = response_data.dict()
+        response_dict["recommendation_id"] = recommendation_id
+        response_dict["recommendation_group"] = recommendation_group
+        # Send to Google Apps Script (non-blocking)
+        try:
+            GOOGLE_SCRIPT_URL = os.environ.get("RECOMMENDATION_URL")
+            if GOOGLE_SCRIPT_URL:
+                requests.post(GOOGLE_SCRIPT_URL, json=response_dict, timeout=3)
+        except Exception as log_exc:
+            print(f"[LOGGING ERROR] Failed to log recommendation: {log_exc}")
+        return response_dict
     except Exception as e:
         print(f"❌ Error in recommendations with ranking: {e}")
         import traceback
