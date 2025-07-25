@@ -290,8 +290,9 @@ class RecommendationModel:
 
             is_same = (cat1 == current_category_str)
             is_swap = (
-                (current_category_str == "Program Reguler" and cat1 == "Program Internasional") or
-                (current_category_str == "Program Internasional" and cat1 == "Program Reguler")
+                (current_category_str == "Program Reguler" and cat1 in ["Program Internasional", "Program PJJ"]) or
+                (current_category_str == "Program Internasional" and cat1 in ["Program Reguler", "Program PJJ"]) or
+                (current_category_str == "Program PJJ" and cat1 in ["Program Reguler", "Program Internasional"])
             )
 
             if is_same or is_swap:
@@ -375,8 +376,9 @@ class RecommendationModel:
 
             is_same = (cat1 == current_category_str)
             is_swap = (
-                (current_category_str == "Program Reguler" and cat1 == "Program Internasional") or
-                (current_category_str == "Program Internasional" and cat1 == "Program Reguler")
+                (current_category_str == "Program Reguler" and cat1 in ["Program Internasional", "Program PJJ"]) or
+                (current_category_str == "Program Internasional" and cat1 in ["Program Reguler", "Program PJJ"]) or
+                (current_category_str == "Program PJJ" and cat1 in ["Program Reguler", "Program Internasional"])
             )
 
             if is_same or is_swap:

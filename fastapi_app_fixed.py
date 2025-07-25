@@ -767,6 +767,77 @@ async def train_ranking_model(request: TrainingRequest, background_tasks: Backgr
         }
     )
 
+@app.post("/train/full", response_model=TrainingResponse, tags=["Training"])
+async def train_full_model(request: TrainingRequest, background_tasks: BackgroundTasks):
+    """Train both retrieval and ranking models sequentially (non-blocking)."""
+    global training_in_progress, current_training, training_status
+
+    # Check if training is already in progress
+    if training_in_progress:
+        raise HTTPException(
+            status_code=400, 
+            detail="Training already in progress. Please wait for current training to complete."
+        )
+
+    # Generate training ID
+    training_id = datetime.now().strftime("%Y%m%d_%H%M%S_full")
+    new_version = datetime.now().strftime("%Y%m%d_%H%M%S_full")
+
+    # Update status
+    training_in_progress = True
+    current_training = training_id
+    training_status.update({
+        "is_training": True,
+        "progress": 0,
+        "current_epoch": 0,
+        "total_epochs": request.epochs,
+        "start_time": datetime.now().isoformat(),
+        "estimated_completion": None,
+        "new_model_version": new_version,
+        "current_training_id": training_id,
+        "training_completed": False,
+        "completion_time": None,
+        "current_step": "starting_full_training"
+    })
+
+    def full_train_thread(training_id, new_version, request):
+        try:
+            # Train retrieval model
+            train_model_thread(training_id, new_version, request)
+            # After retrieval, train ranking model
+            train_ranking_model_thread(training_id + "_ranking", new_version + "_ranking", request)
+        finally:
+            training_status.update({
+                "is_training": False,
+                "current_step": "completed",
+                "training_completed": True,
+                "completion_time": datetime.now().isoformat()
+            })
+            global training_in_progress
+            training_in_progress = False
+
+    # Start full training in background
+    training_thread = threading.Thread(
+        target=full_train_thread,
+        args=(training_id, new_version, request),
+        daemon=True
+    )
+    training_thread.start()
+
+    return TrainingResponse(
+        status="started",
+        message=f"Full model training (retrieval + ranking) started in background (ID: {training_id}, version: {new_version}).",
+        training_info={
+            "training_id": training_id,
+            "epochs": request.epochs,
+            "batch_size": request.batch_size,
+            "estimated_time": f"{request.epochs * 3} minutes",
+            "new_version": new_version,
+            "non_blocking": True,
+            "model_type": "retrieval+ranking"
+        }
+    )
+
 @app.post("/recommendations", response_model=RecommendationResponse, tags=["Recommendations"])
 async def get_recommendations(request: RecommendationRequest, _request: Request):
     if not is_request_whitelisted(_request):
@@ -1653,8 +1724,8 @@ async def reset_training_status_manual():
 security = HTTPBasic()
 
 def docs_auth(credentials: HTTPBasicCredentials = Depends(security)):
-    correct_username = secrets.compare_digest(credentials.username, "admin")  # Ganti dengan username Anda
-    correct_password = secrets.compare_digest(credentials.password, "password123")  # Ganti dengan password Anda
+    correct_username = secrets.compare_digest(credentials.username, os.environ.get("USERNAME"))
+    correct_password = secrets.compare_digest(credentials.password, os.environ.get("PASSWORD"))
     if not (correct_username and correct_password):
         from fastapi import HTTPException
         raise HTTPException(
