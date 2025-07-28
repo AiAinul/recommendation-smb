@@ -6,12 +6,13 @@ import json
 from datetime import datetime
 
 class UserModel(tf.keras.Model):
-    def __init__(self, user_id_lookup, region_lookup, city_lookup, currentview_lookup, embed_dim=64):
+    def __init__(self, user_id_lookup, region_lookup, city_lookup, currentview_lookup, timestamp_normalization_layer=None, embed_dim=64):
         super().__init__()
         self.user_lookup = user_id_lookup
         self.region_lookup = region_lookup
         self.city_lookup = city_lookup
         self.currentview_lookup = currentview_lookup
+        self.timestamp_normalization_layer = timestamp_normalization_layer
 
         self.user_embed = tf.keras.layers.Embedding(self.user_lookup.vocabulary_size(), embed_dim)
         self.region_embed = tf.keras.layers.Embedding(self.region_lookup.vocabulary_size(), embed_dim)
@@ -29,12 +30,28 @@ class UserModel(tf.keras.Model):
         region = self.region_lookup(inputs["region"])
         city = self.city_lookup(inputs["city"])
         currentview = self.currentview_lookup(inputs["item_id_currentview"])
-        concat = tf.concat([
-            self.user_embed(uid),
-            self.region_embed(region),
-            self.city_embed(city),
-            self.currentview_embed(currentview)
-        ], axis=-1)
+        
+        # Add timestamp normalization if available
+        if self.timestamp_normalization_layer is not None and "timestamp_unix" in inputs:
+            # Convert timestamp to float32 for normalization
+            timestamp_input = tf.cast(inputs["timestamp_unix"], tf.float32)
+            timestamp_normalized = self.timestamp_normalization_layer(timestamp_input)
+            # Expand dimensions to match embedding shape [batch_size, 1]
+            timestamp_normalized = tf.expand_dims(timestamp_normalized, axis=-1)
+            concat = tf.concat([
+                self.user_embed(uid),
+                self.region_embed(region),
+                self.city_embed(city),
+                self.currentview_embed(currentview),
+                timestamp_normalized
+            ], axis=-1)
+        else:
+            concat = tf.concat([
+                self.user_embed(uid),
+                self.region_embed(region),
+                self.city_embed(city),
+                self.currentview_embed(currentview)
+            ], axis=-1)
         return self.dense(concat)
 
 class ItemModel(tf.keras.Model):
@@ -81,7 +98,10 @@ class MyTwoTowerModel(tfrs.Model):
             "user_id": features["user_id"],
             "region": features["region"],
             "city": features["city"],
-            "item_id_currentview": features["item_id_currentview"]
+            "item_id_currentview": features["item_id_currentview"],
+            "timestamp_unix": features["timestamp_unix"],
+            "label": features["label"],
+            "item_id_lastview": features["item_id_lastview"]
         })
         item_embeddings = self.item_model({
             "item_id": features["item_id"],
@@ -118,7 +138,10 @@ class RankingModel(tfrs.models.Model):
             "user_id": features["user_id"],
             "region": features["region"],
             "city": features["city"],
-            "item_id_currentview": features["item_id_currentview"]
+            "item_id_currentview": features["item_id_currentview"],
+            "timestamp_unix": features["timestamp_unix"],
+            "label": features["label"],
+            "item_id_lastview": features["item_id_lastview"]
         })
 
         candidate_embeddings = self.candidate_model({
@@ -183,12 +206,18 @@ class RecommendationModel:
         # Create lookup layers
         self.create_lookup_layers(ratings_dataset, movies_dataset)
         
+        # Create timestamp normalization layer
+        from data_processing import DataProcessor
+        data_processor = DataProcessor()
+        timestamp_normalization_layer = data_processor.create_timestamp_normalization_layer(ratings_dataset)
+        
         # Create user and item models
         self.user_model = UserModel(
             self.lookup_layers['user_id'],
             self.lookup_layers['region'],
             self.lookup_layers['city'],
-            self.lookup_layers['currentview']
+            self.lookup_layers['currentview'],
+            timestamp_normalization_layer
         )
         self.item_model = ItemModel(
             self.lookup_layers['item_id'], 
@@ -210,16 +239,17 @@ class RecommendationModel:
     def train_model(self, ratings_dataset, test_dataset=None, epochs=15):
         """Train the retrieval model"""
         if test_dataset is not None:
-            self.model.fit(
+            history = self.model.fit(
                 ratings_dataset.batch(4096),
                 validation_data=test_dataset.batch(4096),
                 epochs=epochs
             )
         else:
-            self.model.fit(
+            history = self.model.fit(
                 ratings_dataset.batch(4096),
                 epochs=epochs
             )
+        return history
 
     def train_ranking_model(self, ranking_dataset, test_dataset=None, epochs=10):
         """Train the ranking model"""
@@ -227,16 +257,17 @@ class RecommendationModel:
             raise ValueError("Ranking model not built. Call build_model() first.")
             
         if test_dataset is not None:
-            self.ranking_model.fit(
+            history = self.ranking_model.fit(
                 ranking_dataset.batch(4096),
                 validation_data=test_dataset.batch(4096),
                 epochs=epochs
             )
         else:
-            self.ranking_model.fit(
+            history = self.ranking_model.fit(
                 ranking_dataset.batch(4096),
                 epochs=epochs
             )
+        return history
 
     def create_index(self, movies_dataset):
         """Create brute force index for recommendations"""
@@ -271,12 +302,19 @@ class RecommendationModel:
             
         current_category_str = self.item_detail_lookup.get(current_item_id, ("-", "-", "-"))[0]
 
+        # Get current timestamp for inference
+        import time
+        current_timestamp = int(time.time())
+
         # Step 1: Get top 10 candidates using retrieval
         scores, ids = self.brute_force_index({
             "user_id": tf.constant([user_id]),
             "region": tf.constant([region]),
             "city": tf.constant([city]),
-            "item_id_currentview": tf.constant([current_item_id])
+            "item_id_currentview": tf.constant([current_item_id]),
+            "timestamp_unix": tf.constant([current_timestamp], dtype=tf.int64),
+#            "label": tf.constant([0.0], dtype=tf.float32),
+            "item_id_lastview": tf.constant([current_item_id])
         })
 
         # Step 2: Filter candidates by category and collect top 10
@@ -314,7 +352,10 @@ class RecommendationModel:
             "user_id": tf.constant([user_id] * len(candidates)),
             "region": tf.constant([region] * len(candidates)),
             "city": tf.constant([city] * len(candidates)),
-            "item_id_currentview": tf.constant([current_item_id] * len(candidates))
+            "item_id_currentview": tf.constant([current_item_id] * len(candidates)),
+            "timestamp_unix": tf.constant([current_timestamp] * len(candidates), dtype=tf.int64),
+#            "label": tf.constant([0.0] * len(candidates), dtype=tf.float32),
+            "item_id_lastview": tf.constant([current_item_id] * len(candidates))
         }
 
         item_features = {
@@ -357,12 +398,18 @@ class RecommendationModel:
             
         current_category_str = self.item_detail_lookup.get(current_item_id, ("-", "-", "-"))[0]
 
+        # Get current timestamp for inference
+        import time
+        current_timestamp = int(time.time())
+
         scores, ids = self.brute_force_index({
             "user_id": tf.constant([user_id]),
             "region": tf.constant([region]),
             "city": tf.constant([city]),
             "item_id_currentview": tf.constant([current_item_id]),
-            "category": tf.constant([current_category_str])
+            "timestamp_unix": tf.constant([current_timestamp], dtype=tf.int64),
+#            "label": tf.constant([0.0], dtype=tf.float32),
+            "item_id_lastview": tf.constant([current_item_id])
         })
 
         topk_filtered = []

@@ -30,6 +30,7 @@ os.environ['TF_USE_LEGACY_KERAS'] = '1'
 # Add global variable for program studi data
 data_processor = DataProcessor()
 program_studi_df = None
+program_studi_last_update = None
 
 def enrich_recommendations_with_program_studi(recommendations, recommendation_id=None):
     global program_studi_df
@@ -57,6 +58,17 @@ def enrich_recommendations_with_program_studi(recommendations, recommendation_id
         rec["kampus"] = extra.get("kampus")
         enriched.append(rec)
     return enriched
+
+def update_program_studi_cache():
+    """Update the cached program studi data"""
+    global program_studi_df, program_studi_last_update
+    try:
+        program_studi_df = pd.read_csv(data_processor.program_studi_url)
+        program_studi_df["item_id"] = program_studi_df["item_id"].astype(str)
+        program_studi_last_update = datetime.now().isoformat()
+        return True, f"Cache updated successfully. Loaded {len(program_studi_df)} records."
+    except Exception as e:
+        return False, f"Failed to update cache: {str(e)}"
 
 # Pydantic models for API requests/responses
 class RecommendationRequest(BaseModel):
@@ -209,6 +221,20 @@ training_status = {
 # Thread lock untuk thread safety
 model_lock = threading.Lock()
 
+# Training metrics untuk model retrieval
+retrieval_metrics = {
+    "factorized_top_k/top_1_categorical_accuracy": 0.0,
+    "total_loss": 0.0,
+    "last_updated": None
+}
+
+# Training metrics untuk model ranking  
+ranking_metrics = {
+    "root_mean_squared_error": 0.0,
+    "total_loss": 0.0,
+    "last_updated": None
+}
+
 def get_available_model_instance():
     """Get available model instance for recommendations"""
     global current_model_instance, previous_model_instance, model_loaded
@@ -258,7 +284,7 @@ def cleanup_old_model():
 
 def train_model_thread(training_id: str, new_version: str, request: TrainingRequest):
     """Separate thread for model training"""
-    global training_in_progress, training_status
+    global training_in_progress, training_status, retrieval_metrics
     
     try:
         print(f"🎯 Starting model training in background thread (ID: {training_id}, version: {new_version})...")
@@ -312,6 +338,31 @@ def train_model_thread(training_id: str, new_version: str, request: TrainingRequ
         print("🎯 Training model...")
         training_status["current_step"] = "training"
         history = training_model.train_model(ratings, epochs=request.epochs)
+        
+        # Setelah training selesai, capture metrics
+        global retrieval_metrics
+        if history and hasattr(history, 'history'):
+            print(f"📊 Training history keys: {list(history.history.keys())}")
+            print(f"📊 Training history values: {history.history}")
+            
+            accuracy_key = "factorized_top_k/top_1_categorical_accuracy"
+            loss_key = "loss"
+            
+            # Get the last epoch values
+            accuracy_value = history.history.get(accuracy_key, [0.0])[-1]
+            loss_value = history.history.get(loss_key, [0.0])[-1]
+            
+            retrieval_metrics.update({
+                "factorized_top_k/top_1_categorical_accuracy": accuracy_value,
+                "total_loss": loss_value,
+                "last_updated": datetime.now().isoformat()
+            })
+            print(f"📊 Retrieval metrics updated: accuracy={accuracy_value:.4f}, loss={loss_value:.4f}")
+        else:
+            print(f"❌ No history object or history.history not available")
+            print(f"📊 History object type: {type(history)}")
+            if history:
+                print(f"📊 History object attributes: {dir(history)}")
         
         # Create index and lookup
         print(" Creating index and lookup...")
@@ -367,7 +418,7 @@ def train_model_thread(training_id: str, new_version: str, request: TrainingRequ
 
 def train_ranking_model_thread(training_id: str, new_version: str, request: TrainingRequest):
     """Separate thread for ranking model training"""
-    global training_in_progress, training_status
+    global training_in_progress, training_status, ranking_metrics
     
     try:
         print(f"🎯 Starting ranking model training in background thread (ID: {training_id}, version: {new_version})...")
@@ -420,6 +471,31 @@ def train_ranking_model_thread(training_id: str, new_version: str, request: Trai
         
         # Train the ranking model using the existing user and item models
         history = available_model_instance.train_ranking_model(ratings, epochs=request.epochs)
+        
+        # Setelah training selesai, capture metrics
+        global ranking_metrics
+        if history and hasattr(history, 'history'):
+            print(f"📊 Ranking training history keys: {list(history.history.keys())}")
+            print(f"📊 Ranking training history values: {history.history}")
+            
+            rmse_key = "root_mean_squared_error"
+            loss_key = "loss"
+            
+            # Get the last epoch values
+            rmse_value = history.history.get(rmse_key, [0.0])[-1]
+            loss_value = history.history.get(loss_key, [0.0])[-1]
+            
+            ranking_metrics.update({
+                "root_mean_squared_error": rmse_value,
+                "total_loss": loss_value,
+                "last_updated": datetime.now().isoformat()
+            })
+            print(f"📊 Ranking metrics updated: rmse={rmse_value:.4f}, loss={loss_value:.4f}")
+        else:
+            print(f"❌ No ranking history object or history.history not available")
+            print(f"📊 Ranking history object type: {type(history)}")
+            if history:
+                print(f"📊 Ranking history object attributes: {dir(history)}")
         
         print("✅ Ranking model training completed successfully!")
         print("🔄 Ranking model is now available for recommendations with ranking")
@@ -1343,7 +1419,15 @@ async def get_main_dashboard():
                 "data_sufficient": total_interactions >= 1000,
                 "can_train": total_interactions > 0,
                 "estimated_accuracy": f"{min(95, max(70, 75 + (total_interactions / 10000) * 10)):.1f}%" if model_loaded else "Not trained",
-                "recommended_epochs": min(20, max(5, int(total_interactions / 1000)))
+                "recommended_epochs": min(20, max(5, int(total_interactions / 1000))),
+                "retrieval_metrics": {
+                    "factorized_top_k/top_1_categorical_accuracy": f"{retrieval_metrics['factorized_top_k/top_1_categorical_accuracy']:.4f}" if model_loaded else "Not trained",
+                    "total_loss": f"{retrieval_metrics['total_loss']:.4f}" if model_loaded else "Not trained"
+                },
+                "ranking_metrics": {
+                    "root_mean_squared_error": f"{ranking_metrics['root_mean_squared_error']:.4f}" if model_loaded else "Not trained", 
+                    "total_loss": f"{ranking_metrics['total_loss']:.4f}" if model_loaded else "Not trained"
+                }
             },
             "real_data_overview": converted_stats
         }
@@ -1748,6 +1832,34 @@ async def overridden_swagger():
 @app.get("/redoc", include_in_schema=False)
 async def custom_redoc_ui(credentials: HTTPBasicCredentials = Depends(docs_auth)):
     return get_redoc_html(openapi_url=app.openapi_url, title=app.title + " - ReDoc")
+
+@app.post("/cache/update-program-studi", tags=["Cache"])
+async def update_program_studi_cache_endpoint(_request: Request):
+    """Update the cached program studi data from the URL"""
+    if not is_request_whitelisted(_request):
+        raise HTTPException(status_code=403, detail="Forbidden: Not whitelisted.")
+    
+    success, message = update_program_studi_cache()
+    
+    if success:
+        return {
+            "status": "success",
+            "message": message,
+            "last_update": program_studi_last_update,
+            "cache_size": len(program_studi_df) if program_studi_df is not None else 0
+        }
+    else:
+        raise HTTPException(status_code=500, detail=message)
+
+@app.get("/cache/program-studi-status", tags=["Cache"])
+async def get_program_studi_cache_status():
+    """Get the current status of program studi cache"""
+    return {
+        "cached": program_studi_df is not None,
+        "last_update": program_studi_last_update,
+        "cache_size": len(program_studi_df) if program_studi_df is not None else 0,
+        "data_source": data_processor.program_studi_url
+    }
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

@@ -150,4 +150,20 @@ class DataProcessor:
             'num_items': dataset['item_id'].nunique(),
             'num_interactions': len(dataset),
             'num_purchases': dataset['label'].sum()
-        } 
+        }
+
+    def create_timestamp_normalization_layer(self, ratings_dataset):
+        """Create and adapt timestamp normalization layer"""
+        timestamp_normalization_layer = tf.keras.layers.Normalization(axis=None)
+        
+        # Convert timestamp_unix to float32 for proper normalization
+        def extract_timestamp(x):
+            return tf.cast(x['timestamp_unix'], tf.float32)
+        
+        # Adapt the normalization layer with timestamp data
+        timestamp_normalization_layer.adapt(
+            ratings_dataset.map(extract_timestamp)
+        )
+        
+        print(f"✅ Timestamp normalization layer created and adapted")
+        return timestamp_normalization_layer 
