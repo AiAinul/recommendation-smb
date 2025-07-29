@@ -228,11 +228,11 @@ class RecommendationModel:
         
         # Create the two-tower model for retrieval
         self.model = MyTwoTowerModel(self.user_model, self.item_model, movies_dataset)
-        self.model.compile(optimizer=tf.keras.optimizers.Adagrad(learning_rate=0.01))
+        self.model.compile(optimizer=tf.keras.optimizers.AdamW(weight_decay=0.001, learning_rate=0.01,))
         
         # Create the ranking model
         self.ranking_model = RankingModel(self.user_model, self.item_model)
-        self.ranking_model.compile(optimizer=tf.keras.optimizers.Adagrad(learning_rate=0.01))
+        self.ranking_model.compile(optimizer=tf.keras.optimizers.AdamW(weight_decay=0.001, learning_rate=0.01,))
         
         return self.model
 
