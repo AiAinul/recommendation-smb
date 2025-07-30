@@ -86,7 +86,15 @@ class DataProcessor:
     def create_interaction_dataset(self, dataset: pd.DataFrame) -> pd.DataFrame:
         """Create the final interaction dataset with all features"""
         
-        dataset_interaction = dataset.sort_values(by=["user_id", "timestamp"])
+        # Filter out users who only interact with 1 item_id
+        user_item_counts = dataset.groupby('user_id')['item_id'].nunique()
+        users_with_multiple_items = user_item_counts[user_item_counts > 1].index
+        dataset_filtered = dataset[dataset['user_id'].isin(users_with_multiple_items)]
+        
+        print(f"📊 Data filtering: Removed {len(dataset) - len(dataset_filtered)} interactions from users with only 1 item")
+        print(f"📊 Remaining: {len(dataset_filtered)} interactions from {len(users_with_multiple_items)} users")
+        
+        dataset_interaction = dataset_filtered.sort_values(by=["user_id", "timestamp"])
         dataset_interaction = (
             dataset_interaction
             .groupby("user_id", group_keys=False)
