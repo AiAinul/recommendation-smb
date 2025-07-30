@@ -295,7 +295,7 @@ class RecommendationModel:
                 cat3 = cat3s[i].decode("utf-8")
                 self.item_detail_lookup[item_id] = (cat1, cat2, cat3)
 
-    def get_recommendations_with_ranking(self, user_id: str, current_item_id: str, region: str, city: str, top_k: int = 5):
+    def get_recommendations_with_ranking(self, user_id: str, current_item_id: str, region: str, city: str, top_k: int = 10):
         """Get recommendations using retrieval + ranking approach"""
         if self.brute_force_index is None:
             raise ValueError("Model index not created. Call create_index() first.")

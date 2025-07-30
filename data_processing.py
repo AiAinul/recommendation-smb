@@ -58,8 +58,8 @@ class DataProcessor:
         dataset = pd.concat([item_view_selected, item_purchase_selected], ignore_index=True)
         dataset['label'] = np.where(
             dataset.event_name.isin(['purchase']),
-            1,
-            0,
+            1.0,
+            0.2,
         )
         dataset['item_id'] = dataset['item_id'].astype(str).str.strip()
         
