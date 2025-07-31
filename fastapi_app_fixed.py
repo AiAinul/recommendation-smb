@@ -230,7 +230,8 @@ retrieval_metrics = {
 
 # Training metrics untuk model ranking  
 ranking_metrics = {
-    "root_mean_squared_error": 0.0,
+    "ndcg": 0.0,
+    "mrr": 0.0,
     "total_loss": 0.0,
     "last_updated": None
 }
@@ -478,19 +479,22 @@ def train_ranking_model_thread(training_id: str, new_version: str, request: Trai
             print(f"📊 Ranking training history keys: {list(history.history.keys())}")
             print(f"📊 Ranking training history values: {history.history}")
             
-            rmse_key = "root_mean_squared_error"
+            ndcg_key = "metric/ndcg"
+            mrr_key = "metric/mrr"
             loss_key = "loss"
             
             # Get the last epoch values
-            rmse_value = history.history.get(rmse_key, [0.0])[-1]
+            ndcg_value = history.history.get(ndcg_key, [0.0])[-1]
+            mrr_value = history.history.get(mrr_key, [0.0])[-1]
             loss_value = history.history.get(loss_key, [0.0])[-1]
             
             ranking_metrics.update({
-                "root_mean_squared_error": rmse_value,
+                "ndcg": ndcg_value,
+                "mrr": mrr_value,
                 "total_loss": loss_value,
                 "last_updated": datetime.now().isoformat()
             })
-            print(f"📊 Ranking metrics updated: rmse={rmse_value:.4f}, loss={loss_value:.4f}")
+            print(f"📊 Ranking metrics updated: ndcg={ndcg_value:.4f}, mrr={mrr_value:.4f}, loss={loss_value:.4f}")
         else:
             print(f"❌ No ranking history object or history.history not available")
             print(f"📊 Ranking history object type: {type(history)}")
@@ -1425,7 +1429,8 @@ async def get_main_dashboard():
                     "total_loss": f"{retrieval_metrics['total_loss']:.4f}" if model_loaded else "Not trained"
                 },
                 "ranking_metrics": {
-                    "root_mean_squared_error": f"{ranking_metrics['root_mean_squared_error']:.4f}" if model_loaded else "Not trained", 
+                    "ndcg": f"{ranking_metrics['ndcg']:.4f}" if model_loaded else "Not trained", 
+                    "mrr": f"{ranking_metrics['mrr']:.4f}" if model_loaded else "Not trained",
                     "total_loss": f"{ranking_metrics['total_loss']:.4f}" if model_loaded else "Not trained"
                 }
             },

@@ -58,6 +58,9 @@ def train_model_directly():
         # Convert to TensorFlow dataset
         ratings = tf.data.Dataset.from_tensor_slices(dict(dataset_interaction[selected_cols]))
         
+        # Create 2D tensor dataset for ranking
+        ranking_dataset = data_processor.create_ranking_dataset_2d(dataset_interaction)
+        
         # Load program studi data
         program_studi = data_processor.load_program_studi_data()
         
@@ -74,6 +77,10 @@ def train_model_directly():
         
         print("🎯 Training model...")
         recommendation_model.train_model(ratings, epochs=15)
+        
+        # Train ranking model with simplified approach
+        print("🎯 Training ranking model with simplified approach...")
+        recommendation_model.train_ranking_model_2d_simple(ranking_dataset, epochs=10)
         
         # Create index and lookup
         print(" Creating index and lookup...")

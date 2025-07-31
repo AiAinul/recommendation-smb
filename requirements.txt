@@ -1,5 +1,6 @@
 tensorflow==2.14.0
 tensorflow-recommenders==0.7.3
+tensorflow-ranking==0.5.5
 fastapi==0.104.1
 uvicorn==0.24.0
 pandas==2.0.3

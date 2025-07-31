@@ -174,4 +174,152 @@ class DataProcessor:
         )
         
         print(f"✅ Timestamp normalization layer created and adapted")
-        return timestamp_normalization_layer 
+        return timestamp_normalization_layer
+
+    def create_ranking_dataset(self, dataset: pd.DataFrame) -> Tuple[tf.data.Dataset, tf.data.Dataset]:
+        """
+        Create 2D tensor datasets for TensorFlow Ranking
+        Returns: (user_features_dataset, item_features_dataset)
+        """
+        print("🔄 Creating ranking datasets with 2D tensors...")
+        
+        # Group by user_id to create lists of interactions
+        user_groups = dataset.groupby('user_id')
+        
+        user_features_list = []
+        item_features_list = []
+        
+        for user_id, group in user_groups:
+            if len(group) < 2:  # Skip users with less than 2 interactions
+                continue
+                
+            # Sort by timestamp
+            group = group.sort_values('timestamp_unix')
+            
+            # Create user features (same for all items in the group)
+            user_features = {
+                'user_id': [user_id] * len(group),
+                'region': [group['region'].iloc[0]] * len(group),
+                'city': [group['city'].iloc[0]] * len(group),
+                'item_id_currentview': [group['item_id'].iloc[-1]] * len(group),  # Current item
+                'timestamp_unix': [group['timestamp_unix'].iloc[-1]] * len(group),  # Current timestamp
+                'item_id_lastview': [group['item_id'].iloc[-2] if len(group) > 1 else group['item_id'].iloc[-1]] * len(group)
+            }
+            
+            # Create item features (different for each item)
+            item_features = {
+                'item_id': group['item_id'].tolist(),
+                'category': group['category'].tolist(),
+                'category2': group['category2'].tolist(),
+                'category3': group['category3'].tolist(),
+                'label': group['label'].tolist()
+            }
+            
+            user_features_list.append(user_features)
+            item_features_list.append(item_features)
+        
+        # Convert to TensorFlow datasets
+        user_features_dataset = tf.data.Dataset.from_tensor_slices(user_features_list)
+        item_features_dataset = tf.data.Dataset.from_tensor_slices(item_features_list)
+        
+        print(f"✅ Created ranking datasets: {len(user_features_list)} user groups")
+        return user_features_dataset, item_features_dataset
+
+    def create_ranking_dataset_simple(self, dataset: pd.DataFrame) -> tf.data.Dataset:
+        """
+        Create a 2D tensor dataset for ranking with proper tensor shapes
+        Returns a dataset where each element is a group of items for a user
+        """
+        print("🔄 Creating 2D ranking dataset...")
+        
+        # Group by user_id
+        user_groups = dataset.groupby('user_id')
+        
+        ranking_data = []
+        
+        for user_id, group in user_groups:
+            if len(group) < 2:  # Skip users with less than 2 interactions
+                continue
+                
+            # Sort by timestamp
+            group = group.sort_values('timestamp_unix')
+            
+            # Create a single record with all items for this user
+            user_record = {
+                'user_id': user_id,
+                'region': group['region'].iloc[0],
+                'city': group['city'].iloc[0],
+                'item_id_currentview': group['item_id'].iloc[-1],
+                'timestamp_unix': group['timestamp_unix'].iloc[-1],
+                'item_id_lastview': group['item_id'].iloc[-2] if len(group) > 1 else group['item_id'].iloc[-1],
+                'item_ids': group['item_id'].tolist(),
+                'categories': group['category'].tolist(),
+                'categories2': group['category2'].tolist(),
+                'categories3': group['category3'].tolist(),
+                'labels': group['label'].tolist()
+            }
+            
+            ranking_data.append(user_record)
+        
+        # Convert to TensorFlow dataset
+        ranking_dataset = tf.data.Dataset.from_tensor_slices(ranking_data)
+        
+        print(f"✅ Created 2D ranking dataset: {len(ranking_data)} user groups")
+        return ranking_dataset
+
+    def create_ranking_dataset_2d(self, dataset: pd.DataFrame) -> tf.data.Dataset:
+        """
+        Create proper 2D tensor dataset for TensorFlow Ranking
+        Returns dataset with 2D tensors for labels and predictions
+        """
+        print("🔄 Creating proper 2D ranking dataset...")
+        
+        # Group by user_id
+        user_groups = dataset.groupby('user_id')
+        
+        ranking_data = []
+        
+        for user_id, group in user_groups:
+            if len(group) < 2:  # Skip users with less than 2 interactions
+                continue
+                
+            # Sort by timestamp
+            group = group.sort_values('timestamp_unix')
+            
+            # Create 2D tensors for labels and item features
+            num_items = len(group)
+            
+            # Create user features (same for all items)
+            user_features = {
+                'user_id': [user_id] * num_items,
+                'region': [group['region'].iloc[0]] * num_items,
+                'city': [group['city'].iloc[0]] * num_items,
+                'item_id_currentview': [group['item_id'].iloc[-1]] * num_items,
+                'timestamp_unix': [group['timestamp_unix'].iloc[-1]] * num_items,
+                'item_id_lastview': [group['item_id'].iloc[-2] if len(group) > 1 else group['item_id'].iloc[-1]] * num_items
+            }
+            
+            # Create item features (different for each item)
+            item_features = {
+                'item_id': group['item_id'].tolist(),
+                'category': group['category'].tolist(),
+                'category2': group['category2'].tolist(),
+                'category3': group['category3'].tolist(),
+                'label': group['label'].tolist()
+            }
+            
+            # Create 2D tensor record
+            record = {
+                'user_features': user_features,
+                'item_features': item_features,
+                'labels_2d': tf.reshape(tf.constant(group['label'].tolist()), [1, -1]),  # [1, num_items]
+                'num_items': num_items
+            }
+            
+            ranking_data.append(record)
+        
+        # Convert to TensorFlow dataset
+        ranking_dataset = tf.data.Dataset.from_tensor_slices(ranking_data)
+        
+        print(f"✅ Created proper 2D ranking dataset: {len(ranking_data)} user groups")
+        return ranking_dataset 

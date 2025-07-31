@@ -126,39 +126,77 @@ class RankingModel(tfrs.models.Model):
                 tf.keras.layers.Dense(1)
             ]
         )
+        # Import tensorflow_ranking
+        import tensorflow_ranking as tfr
+        
         self.ranking_task_layer: tf.keras.layers.Layer = tfrs.tasks.Ranking(
-            loss=tf.keras.losses.MeanSquaredError(),
+            loss=tfr.keras.losses.get(
+                loss=tfr.keras.losses.RankingLossKey.SOFTMAX_LOSS, ragged=False),
             metrics=[
-                tf.keras.metrics.RootMeanSquaredError()
+                tfr.keras.metrics.get(key="ndcg", name="metric/ndcg", ragged=False),
+                tfr.keras.metrics.get(key="mrr", name="metric/mrr", ragged=False)
             ]
         )
 
     def compute_loss(self, features, training=False) -> tf.Tensor:
-        query_embeddings = self.query_model({
-            "user_id": features["user_id"],
-            "region": features["region"],
-            "city": features["city"],
-            "item_id_currentview": features["item_id_currentview"],
-            "timestamp_unix": features["timestamp_unix"],
-            "label": features["label"],
-            "item_id_lastview": features["item_id_lastview"]
-        })
+        # Always convert to 2D format for TensorFlow Ranking
+        if isinstance(features, dict) and 'user_features' in features and 'item_features' in features:
+            # 2D tensor format: features contains user_features and item_features
+            user_features = features['user_features']
+            item_features = features['item_features']
+            labels_2d = features['labels_2d']
+            
+            query_embeddings = self.query_model(user_features)
+            candidate_embeddings = self.candidate_model(item_features)
+            
+            rating_predictions = self.rating_model(
+                tf.concat([query_embeddings, candidate_embeddings], axis=1)
+            )
+            
+            # Reshape predictions to 2D format for TensorFlow Ranking
+            batch_size = tf.shape(rating_predictions)[0]
+            num_items_per_user = tf.shape(rating_predictions)[0] // batch_size
+            
+            # Reshape predictions to [batch_size, num_items_per_user]
+            rating_predictions_2d = tf.reshape(rating_predictions, [batch_size, num_items_per_user])
+            
+            loss = self.ranking_task_layer(
+                predictions=rating_predictions_2d,
+                labels=labels_2d
+            )
+        else:
+            # Convert 1D format to 2D format
+            query_embeddings = self.query_model({
+                "user_id": features["user_id"],
+                "region": features["region"],
+                "city": features["city"],
+                "item_id_currentview": features["item_id_currentview"],
+                "timestamp_unix": features["timestamp_unix"],
+                "label": features["label"],
+                "item_id_lastview": features["item_id_lastview"]
+            })
 
-        candidate_embeddings = self.candidate_model({
-            "item_id": features["item_id"],
-            "category": features["category"],
-            "category2": features["category2"],
-            "category3": features["category3"]
-        })
+            candidate_embeddings = self.candidate_model({
+                "item_id": features["item_id"],
+                "category": features["category"],
+                "category2": features["category2"],
+                "category3": features["category3"]
+            })
 
-        rating_predictions = self.rating_model(
-            tf.concat([query_embeddings, candidate_embeddings], axis=1)
-        )
+            rating_predictions = self.rating_model(
+                tf.concat([query_embeddings, candidate_embeddings], axis=1)
+            )
 
-        loss = self.ranking_task_layer(
-            predictions=rating_predictions,
-            labels=features["label"]
-        )
+            # Convert 1D tensors to 2D tensors for TensorFlow Ranking
+            # Reshape predictions from [batch_size, 1] to [batch_size, 1]
+            rating_predictions_2d = tf.reshape(rating_predictions, [-1, 1])
+            labels_2d = tf.reshape(features["label"], [-1, 1])
+
+            loss = self.ranking_task_layer(
+                predictions=rating_predictions_2d,
+                labels=labels_2d
+            )
+        
         return loss
 
 class RecommendationModel:
@@ -269,6 +307,118 @@ class RecommendationModel:
             )
         return history
 
+    def train_ranking_model_2d(self, ranking_dataset, test_dataset=None, epochs=10):
+        """Train the ranking model with 2D tensor format for NDCG and MRR"""
+        if self.ranking_model is None:
+            raise ValueError("Ranking model not built. Call build_model() first.")
+        
+        # Convert dataset to 2D format for TensorFlow Ranking
+        def prepare_2d_data(batch):
+            # Get the number of items for this user
+            num_items = len(batch['item_ids'])
+            
+            # Create user features (repeated for each item)
+            user_features = {
+                'user_id': [batch['user_id']] * num_items,
+                'region': [batch['region']] * num_items,
+                'city': [batch['city']] * num_items,
+                'item_id_currentview': [batch['item_id_currentview']] * num_items,
+                'timestamp_unix': [batch['timestamp_unix']] * num_items,
+                'item_id_lastview': [batch['item_id_lastview']] * num_items
+            }
+            
+            # Create item features (different for each item)
+            item_features = {
+                'item_id': batch['item_ids'],
+                'category': batch['categories'],
+                'category2': batch['categories2'],
+                'category3': batch['categories3'],
+                'label': batch['labels']
+            }
+            
+            # Create 2D tensor record
+            record = {
+                'user_features': user_features,
+                'item_features': item_features,
+                'labels_2d': tf.reshape(tf.constant(batch['labels']), [1, -1]),  # [1, num_items]
+                'num_items': num_items
+            }
+            
+            return record
+        
+        # Process the dataset
+        processed_dataset = ranking_dataset.map(prepare_2d_data)
+        
+        if test_dataset is not None:
+            test_processed = test_dataset.map(prepare_2d_data)
+            history = self.ranking_model.fit(
+                processed_dataset.batch(4096),
+                validation_data=test_processed.batch(4096),
+                epochs=epochs
+            )
+        else:
+            history = self.ranking_model.fit(
+                processed_dataset.batch(4096),
+                epochs=epochs
+            )
+        return history
+
+    def train_ranking_model_2d_simple(self, ranking_dataset, test_dataset=None, epochs=10):
+        """Train the ranking model with 2D tensor format for NDCG and MRR"""
+        if self.ranking_model is None:
+            raise ValueError("Ranking model not built. Call build_model() first.")
+        
+        # Convert dataset to 2D format for TensorFlow Ranking
+        def prepare_2d_data(batch):
+            # Get the number of items for this user
+            num_items = len(batch['item_ids'])
+            
+            # Create user features (repeated for each item)
+            user_features = {
+                'user_id': [batch['user_id']] * num_items,
+                'region': [batch['region']] * num_items,
+                'city': [batch['city']] * num_items,
+                'item_id_currentview': [batch['item_id_currentview']] * num_items,
+                'timestamp_unix': [batch['timestamp_unix']] * num_items,
+                'item_id_lastview': [batch['item_id_lastview']] * num_items
+            }
+            
+            # Create item features (different for each item)
+            item_features = {
+                'item_id': batch['item_ids'],
+                'category': batch['categories'],
+                'category2': batch['categories2'],
+                'category3': batch['categories3'],
+                'label': batch['labels']
+            }
+            
+            # Create 2D tensor record
+            record = {
+                'user_features': user_features,
+                'item_features': item_features,
+                'labels_2d': tf.reshape(tf.constant(batch['labels']), [1, -1]),  # [1, num_items]
+                'num_items': num_items
+            }
+            
+            return record
+        
+        # Process the dataset
+        processed_dataset = ranking_dataset.map(prepare_2d_data)
+        
+        if test_dataset is not None:
+            test_processed = test_dataset.map(prepare_2d_data)
+            history = self.ranking_model.fit(
+                processed_dataset.batch(4096),
+                validation_data=test_processed.batch(4096),
+                epochs=epochs
+            )
+        else:
+            history = self.ranking_model.fit(
+                processed_dataset.batch(4096),
+                epochs=epochs
+            )
+        return history
+
     def create_index(self, movies_dataset):
         """Create brute force index for recommendations"""
         self.brute_force_index = tfrs.layers.factorized_top_k.BruteForce(self.user_model)
@@ -300,96 +450,111 @@ class RecommendationModel:
         if self.brute_force_index is None:
             raise ValueError("Model index not created. Call create_index() first.")
             
+        if self.ranking_model is None:
+            raise ValueError("Ranking model not built. Call build_model() first.")
+            
         current_category_str = self.item_detail_lookup.get(current_item_id, ("-", "-", "-"))[0]
 
         # Get current timestamp for inference
         import time
         current_timestamp = int(time.time())
 
-        # Step 1: Get top 10 candidates using retrieval
-        scores, ids = self.brute_force_index({
-            "user_id": tf.constant([user_id]),
-            "region": tf.constant([region]),
-            "city": tf.constant([city]),
-            "item_id_currentview": tf.constant([current_item_id]),
-            "timestamp_unix": tf.constant([current_timestamp], dtype=tf.int64),
-#            "label": tf.constant([0.0], dtype=tf.float32),
-            "item_id_lastview": tf.constant([current_item_id])
-        })
-
-        # Step 2: Filter candidates by category and collect top 10
-        candidates = []
-        for i in range(scores.shape[1]):
-            item_id = ids[0, i].numpy().decode("utf-8")
-            if item_id == current_item_id:
-                continue
-
-            cat1, cat2, cat3 = self.item_detail_lookup.get(item_id, ("-", "-", "-"))
-
-            is_same = (cat1 == current_category_str)
-            is_swap = (
-                (current_category_str == "Program Reguler" and cat1 in ["Program Internasional", "Program PJJ"]) or
-                (current_category_str == "Program Internasional" and cat1 in ["Program Reguler", "Program PJJ"]) or
-                (current_category_str == "Program PJJ" and cat1 in ["Program Reguler", "Program Internasional"])
-            )
-
-            if is_same or is_swap:
-                candidates.append({
-                    'item_id': item_id,
-                    'category': cat1,
-                    'category2': cat2,
-                    'category3': cat3
-                })
-
-            if len(candidates) >= 5:  # Get top 5 candidates
-                break
-
-        if not candidates:
-            return []
-
-        # Step 3: Use ranking model to score and re-rank candidates
-        user_features = {
-            "user_id": tf.constant([user_id] * len(candidates)),
-            "region": tf.constant([region] * len(candidates)),
-            "city": tf.constant([city] * len(candidates)),
-            "item_id_currentview": tf.constant([current_item_id] * len(candidates)),
-            "timestamp_unix": tf.constant([current_timestamp] * len(candidates), dtype=tf.int64),
-#            "label": tf.constant([0.0] * len(candidates), dtype=tf.float32),
-            "item_id_lastview": tf.constant([current_item_id] * len(candidates))
-        }
-
-        item_features = {
-            "item_id": tf.constant([c['item_id'] for c in candidates]),
-            "category": tf.constant([c['category'] for c in candidates]),
-            "category2": tf.constant([c['category2'] for c in candidates]),
-            "category3": tf.constant([c['category3'] for c in candidates])
-        }
-
-        # Get ranking scores
-        if self.ranking_model is None:
-            raise ValueError("Ranking model not built. Call build_model() first.")
-            
-        ranking_scores = self.ranking_model.rating_model(
-            tf.concat([
-                self.ranking_model.query_model(user_features),
-                self.ranking_model.candidate_model(item_features)
-            ], axis=1)
-        )
-
-        # Combine candidates with ranking scores
-        ranked_candidates = []
-        for i, candidate in enumerate(candidates):
-            ranked_candidates.append({
-                'item_id': candidate['item_id'],
-                'score': float(ranking_scores[i][0]),
-                'category': candidate['category'],
-                'category2': candidate['category2'],
-                'category3': candidate['category3']
+        try:
+            # Step 1: Get top 10 candidates using retrieval
+            scores, ids = self.brute_force_index({
+                "user_id": tf.constant([user_id]),
+                "region": tf.constant([region]),
+                "city": tf.constant([city]),
+                "item_id_currentview": tf.constant([current_item_id]),
+                "timestamp_unix": tf.constant([current_timestamp], dtype=tf.int64),
+                "item_id_lastview": tf.constant([current_item_id])
             })
 
-        # Sort by ranking score (descending) and return top_k
-        ranked_candidates.sort(key=lambda x: x['score'], reverse=True)
-        return ranked_candidates[:top_k]
+            # Step 2: Filter candidates by category and collect top 10
+            candidates = []
+            for i in range(scores.shape[1]):
+                item_id = ids[0, i].numpy().decode("utf-8")
+                if item_id == current_item_id:
+                    continue
+
+                cat1, cat2, cat3 = self.item_detail_lookup.get(item_id, ("-", "-", "-"))
+
+                is_same = (cat1 == current_category_str)
+                is_swap = (
+                    (current_category_str == "Program Reguler" and cat1 in ["Program Internasional", "Program PJJ"]) or
+                    (current_category_str == "Program Internasional" and cat1 in ["Program Reguler", "Program PJJ"]) or
+                    (current_category_str == "Program PJJ" and cat1 in ["Program Reguler", "Program Internasional"])
+                )
+
+                if is_same or is_swap:
+                    candidates.append({
+                        'item_id': item_id,
+                        'category': cat1,
+                        'category2': cat2,
+                        'category3': cat3
+                    })
+
+                if len(candidates) >= 5:  # Get top 5 candidates
+                    break
+
+            if not candidates:
+                print(f"⚠️ No candidates found for user {user_id}, item {current_item_id}")
+                return []
+
+            # Step 3: Use ranking model to score and re-rank candidates
+            user_features = {
+                "user_id": tf.constant([user_id] * len(candidates)),
+                "region": tf.constant([region] * len(candidates)),
+                "city": tf.constant([city] * len(candidates)),
+                "item_id_currentview": tf.constant([current_item_id] * len(candidates)),
+                "timestamp_unix": tf.constant([current_timestamp] * len(candidates), dtype=tf.int64),
+                "item_id_lastview": tf.constant([current_item_id] * len(candidates))
+            }
+
+            item_features = {
+                "item_id": tf.constant([c['item_id'] for c in candidates]),
+                "category": tf.constant([c['category'] for c in candidates]),
+                "category2": tf.constant([c['category2'] for c in candidates]),
+                "category3": tf.constant([c['category3'] for c in candidates])
+            }
+
+            # Get ranking scores
+            try:
+                query_embeddings = self.ranking_model.query_model(user_features)
+                candidate_embeddings = self.ranking_model.candidate_model(item_features)
+                
+                combined_features = tf.concat([query_embeddings, candidate_embeddings], axis=1)
+                ranking_scores = self.ranking_model.rating_model(combined_features)
+                
+                print(f"✅ Ranking scores shape: {ranking_scores.shape}, scores: {ranking_scores.numpy()}")
+                
+            except Exception as e:
+                print(f"❌ Error in ranking model inference: {e}")
+                # Fallback to retrieval-only recommendations
+                return self.get_recommendations(user_id, current_item_id, region, city, top_k)
+
+            # Combine candidates with ranking scores
+            ranked_candidates = []
+            for i, candidate in enumerate(candidates):
+                ranked_candidates.append({
+                    'item_id': candidate['item_id'],
+                    'score': float(ranking_scores[i][0]),
+                    'category': candidate['category'],
+                    'category2': candidate['category2'],
+                    'category3': candidate['category3']
+                })
+
+            # Sort by ranking score (descending) and return top_k
+            ranked_candidates.sort(key=lambda x: x['score'], reverse=True)
+            print(f"✅ Generated {len(ranked_candidates)} ranked recommendations")
+            return ranked_candidates[:top_k]
+            
+        except Exception as e:
+            print(f"❌ Error in get_recommendations_with_ranking: {e}")
+            import traceback
+            traceback.print_exc()
+            # Fallback to retrieval-only recommendations
+            return self.get_recommendations(user_id, current_item_id, region, city, top_k)
 
     def get_recommendations(self, user_id: str, current_item_id: str, region: str, city: str, top_k: int = 5):
         """Get recommendations for a user (original retrieval-only method)"""
