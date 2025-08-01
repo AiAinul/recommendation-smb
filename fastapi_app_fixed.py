@@ -430,7 +430,7 @@ def train_ranking_model_thread(training_id: str, new_version: str, request: Trai
         
         # Load and process data
         dataset, _ = data_processor.load_and_process_data()
-        dataset_interaction = data_processor.create_interaction_dataset(dataset)
+        dataset_interaction = data_processor.create_ranking_dataset(dataset)
         
         # Convert to TensorFlow datasets with proper data types
         selected_cols = [
@@ -481,20 +481,29 @@ def train_ranking_model_thread(training_id: str, new_version: str, request: Trai
             
             ndcg_key = "metric/ndcg"
             mrr_key = "metric/mrr"
+            map_key = "metric/map"
+            precision_key = "metric/precision"
             loss_key = "loss"
+            regularization_loss_key = "regularization_loss"
             
             # Get the last epoch values
             ndcg_value = history.history.get(ndcg_key, [0.0])[-1]
             mrr_value = history.history.get(mrr_key, [0.0])[-1]
+            map_value = history.history.get(map_key, [0.0])[-1]
+            precision_value = history.history.get(precision_key, [0.0])[-1]
             loss_value = history.history.get(loss_key, [0.0])[-1]
+            regularization_loss_value = history.history.get(regularization_loss_key, [0.0])[-1]
             
             ranking_metrics.update({
                 "ndcg": ndcg_value,
                 "mrr": mrr_value,
+                "map": map_value,
+                "precision": precision_value,
                 "total_loss": loss_value,
+                "regularization_loss": regularization_loss_value,
                 "last_updated": datetime.now().isoformat()
             })
-            print(f"📊 Ranking metrics updated: ndcg={ndcg_value:.4f}, mrr={mrr_value:.4f}, loss={loss_value:.4f}")
+            print(f"📊 Ranking metrics updated: ndcg={ndcg_value:.4f}, mrr={mrr_value:.4f}, map={map_value:.4f}, precision={precision_value:.4f}, loss={loss_value:.4f}, reg_loss={regularization_loss_value:.4f}")
         else:
             print(f"❌ No ranking history object or history.history not available")
             print(f"📊 Ranking history object type: {type(history)}")
@@ -1129,7 +1138,7 @@ async def get_data_stats():
     """Get dataset statistics"""
     try:
         dataset, _ = data_processor.load_and_process_data()
-        dataset_interaction = data_processor.create_interaction_dataset(dataset)
+        dataset_interaction = data_processor.create_retrieval_dataset(dataset)
         stats = data_processor.get_dataset_stats(dataset_interaction)
         
         # Convert numpy types to Python native types
@@ -1342,7 +1351,7 @@ async def get_data_quality_metrics():
     """Get data quality metrics"""
     try:
         dataset, _ = data_processor.load_and_process_data()
-        dataset_interaction = data_processor.create_interaction_dataset(dataset)
+        dataset_interaction = data_processor.create_retrieval_dataset(dataset)
         
         # Calculate data quality metrics
         total_rows = len(dataset_interaction)
@@ -1382,7 +1391,7 @@ async def get_main_dashboard():
     try:
         # Get real data stats
         dataset, _ = data_processor.load_and_process_data()
-        dataset_interaction = data_processor.create_interaction_dataset(dataset)
+        dataset_interaction = data_processor.create_retrieval_dataset(dataset)
         stats = data_processor.get_dataset_stats(dataset_interaction)
         
         # Convert numpy types to Python native types

@@ -78,9 +78,9 @@ def train_model_directly():
         print("🎯 Training model...")
         recommendation_model.train_model(ratings, epochs=15)
         
-        # Train ranking model with simplified approach
-        print("🎯 Training ranking model with simplified approach...")
-        recommendation_model.train_ranking_model_2d_simple(ranking_dataset, epochs=10)
+        # Train ranking model with 2D approach
+        print("🎯 Training ranking model with 2D approach...")
+        recommendation_model.train_ranking_model_2d(ranking_dataset, epochs=10)
         
         # Create index and lookup
         print(" Creating index and lookup...")

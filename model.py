@@ -121,9 +121,22 @@ class RankingModel(tfrs.models.Model):
         self.candidate_model: tf.keras.Model = item_model
         self.rating_model = tf.keras.Sequential(
             [
-                tf.keras.layers.Dense(256, activation='relu'),
+                tf.keras.layers.Dense(512, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.01)),
+                tf.keras.layers.BatchNormalization(),
+                tf.keras.layers.ReLU(),
+                tf.keras.layers.Dropout(0.3),
+
+                tf.keras.layers.Dense(256, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.01)),
+                tf.keras.layers.BatchNormalization(),
+                tf.keras.layers.ReLU(),
+                tf.keras.layers.Dropout(0.2),
+
+                tf.keras.layers.Dense(128, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.01)),
+                tf.keras.layers.BatchNormalization(),
+                tf.keras.layers.ReLU(),
+                tf.keras.layers.Dropout(0.1),
                 tf.keras.layers.Dense(64, activation='relu'),
-                tf.keras.layers.Dense(1)
+                tf.keras.layers.Dense(1, activation='sigmoid')
             ]
         )
         # Import tensorflow_ranking
@@ -131,10 +144,12 @@ class RankingModel(tfrs.models.Model):
         
         self.ranking_task_layer: tf.keras.layers.Layer = tfrs.tasks.Ranking(
             loss=tfr.keras.losses.get(
-                loss=tfr.keras.losses.RankingLossKey.SOFTMAX_LOSS, ragged=False),
+                loss=tfr.keras.losses.RankingLossKey.APPROX_NDCG_LOSS, ragged=False),
             metrics=[
-                tfr.keras.metrics.get(key="ndcg", name="metric/ndcg", ragged=False),
-                tfr.keras.metrics.get(key="mrr", name="metric/mrr", ragged=False)
+                tfr.keras.metrics.get(key="ndcg", name="metric/ndcg", ragged=False, topn=10),
+                tfr.keras.metrics.get(key="mrr", name="metric/mrr", ragged=False),
+                tfr.keras.metrics.get(key="map", name="metric/map", ragged=False),
+                tfr.keras.metrics.get(key="precision", name="metric/precision", ragged=False, topn=5)
             ]
         )
 
@@ -308,62 +323,6 @@ class RecommendationModel:
         return history
 
     def train_ranking_model_2d(self, ranking_dataset, test_dataset=None, epochs=10):
-        """Train the ranking model with 2D tensor format for NDCG and MRR"""
-        if self.ranking_model is None:
-            raise ValueError("Ranking model not built. Call build_model() first.")
-        
-        # Convert dataset to 2D format for TensorFlow Ranking
-        def prepare_2d_data(batch):
-            # Get the number of items for this user
-            num_items = len(batch['item_ids'])
-            
-            # Create user features (repeated for each item)
-            user_features = {
-                'user_id': [batch['user_id']] * num_items,
-                'region': [batch['region']] * num_items,
-                'city': [batch['city']] * num_items,
-                'item_id_currentview': [batch['item_id_currentview']] * num_items,
-                'timestamp_unix': [batch['timestamp_unix']] * num_items,
-                'item_id_lastview': [batch['item_id_lastview']] * num_items
-            }
-            
-            # Create item features (different for each item)
-            item_features = {
-                'item_id': batch['item_ids'],
-                'category': batch['categories'],
-                'category2': batch['categories2'],
-                'category3': batch['categories3'],
-                'label': batch['labels']
-            }
-            
-            # Create 2D tensor record
-            record = {
-                'user_features': user_features,
-                'item_features': item_features,
-                'labels_2d': tf.reshape(tf.constant(batch['labels']), [1, -1]),  # [1, num_items]
-                'num_items': num_items
-            }
-            
-            return record
-        
-        # Process the dataset
-        processed_dataset = ranking_dataset.map(prepare_2d_data)
-        
-        if test_dataset is not None:
-            test_processed = test_dataset.map(prepare_2d_data)
-            history = self.ranking_model.fit(
-                processed_dataset.batch(4096),
-                validation_data=test_processed.batch(4096),
-                epochs=epochs
-            )
-        else:
-            history = self.ranking_model.fit(
-                processed_dataset.batch(4096),
-                epochs=epochs
-            )
-        return history
-
-    def train_ranking_model_2d_simple(self, ranking_dataset, test_dataset=None, epochs=10):
         """Train the ranking model with 2D tensor format for NDCG and MRR"""
         if self.ranking_model is None:
             raise ValueError("Ranking model not built. Call build_model() first.")
