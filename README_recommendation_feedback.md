@@ -101,7 +101,7 @@ history = model.train_ranking_model_with_feedback(
 ### 1. Environment Variable
 Tambahkan environment variable untuk dataset feedback:
 ```bash
-RECOMMENDATION_DATASET_URL="https://docs.google.com/spreadsheets/d/e/2PACX-1vQEVj6jiBSfXNYNkd0Cd0T7JvaUxUKGPWjzdVXXy9kSNoI3ACWwlhxTsviMu8nfAGfIAYlYM9bko_kB/pub?output=csv"
+RECOMMENDATION_DATASET_URL="https://docs.google.com/spreadsheets/d/e/xxxxx/pub?output=csv"
 ```
 
 ### 2. API Endpoints Baru
@@ -177,13 +177,6 @@ df['label'] = df['label'].astype(np.float32)
 df['timestamp_unix'] = df['timestamp_unix'].astype(np.int64)
 ```
 
-## Testing
-
-Jalankan test script untuk memverifikasi integrasi:
-
-```bash
-python test_recommendation_feedback.py
-```
 
 ## Expected Improvements
 

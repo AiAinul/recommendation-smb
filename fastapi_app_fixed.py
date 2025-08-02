@@ -432,8 +432,8 @@ def train_ranking_model_thread(training_id: str, new_version: str, request: Trai
         dataset, _ = data_processor.load_and_process_data()
         dataset_interaction = data_processor.create_ranking_dataset(dataset)
         
-        # Load recommendation feedback dataset
-        recommendation_feedback = data_processor.load_recommendation_dataset()
+        # Load recommendation feedback dataset with correct prediction
+        recommendation_feedback = data_processor.load_recommendation_dataset_with_correct_prediction()
         
         # Convert to TensorFlow datasets with proper data types
         selected_cols = [
@@ -470,21 +470,21 @@ def train_ranking_model_thread(training_id: str, new_version: str, request: Trai
         if available_model_instance is None:
             raise Exception("No base model available for ranking training")
         
-        print("🎯 Training ranking model with feedback...")
+        print("🎯 Training ranking model with rank-based feedback...")
         training_status["current_step"] = "training_ranking"
         
-        # Train the ranking model using the existing user and item models with feedback
+        # Train the ranking model using rank-based feedback
         if len(recommendation_feedback) > 0:
-            print(f"📊 Using {len(recommendation_feedback)} recommendation feedback examples")
+            print(f"📊 Using {len(recommendation_feedback)} rank-based feedback examples")
             
-            # Try to enhance the dataset with feedback
+            # Try to enhance the dataset with rank-based feedback
             try:
                 # Convert TensorFlow dataset to pandas DataFrame for enhancement
                 ratings_df = data_processor.convert_tf_dataset_to_pandas(ratings)
                 
                 if ratings_df is not None:
-                    # Create enhanced dataset with feedback
-                    enhanced_dataset = data_processor.create_enhanced_training_dataset(
+                    # Create enhanced dataset with rank-based feedback
+                    enhanced_dataset = data_processor.create_enhanced_training_dataset_with_rank(
                         ratings_df, 
                         recommendation_feedback
                     )
@@ -493,8 +493,13 @@ def train_ranking_model_thread(training_id: str, new_version: str, request: Trai
                     enhanced_ratings = data_processor.convert_pandas_to_tf_dataset(enhanced_dataset)
                     
                     if enhanced_ratings is not None:
-                        print(f"✅ Enhanced dataset created: {len(enhanced_dataset)} rows")
-                        history = available_model_instance.train_ranking_model(enhanced_ratings, epochs=request.epochs)
+                        print(f"✅ Enhanced dataset with rank-based labels created: {len(enhanced_dataset)} rows")
+                        # Use rank-based training method
+                        history = available_model_instance.train_ranking_model_with_rank_feedback(
+                            enhanced_ratings, 
+                            recommendation_feedback_dataset=recommendation_feedback,
+                            epochs=request.epochs
+                        )
                     else:
                         print("⚠️ Failed to convert enhanced dataset to TensorFlow format")
                         print("📊 Falling back to standard training without feedback")
@@ -505,11 +510,11 @@ def train_ranking_model_thread(training_id: str, new_version: str, request: Trai
                     history = available_model_instance.train_ranking_model(ratings, epochs=request.epochs)
                 
             except Exception as e:
-                print(f"⚠️ Error enhancing dataset with feedback: {e}")
+                print(f"⚠️ Error enhancing dataset with rank-based feedback: {e}")
                 print("📊 Falling back to standard training without feedback")
                 history = available_model_instance.train_ranking_model(ratings, epochs=request.epochs)
         else:
-            print("📊 No recommendation feedback available, using standard training")
+            print("📊 No rank-based feedback available, using standard training")
             history = available_model_instance.train_ranking_model(ratings, epochs=request.epochs)
         
         # Setelah training selesai, capture metrics
@@ -1921,8 +1926,8 @@ async def evaluate_recommendation_accuracy():
         raise HTTPException(status_code=400, detail="No model available in memory. Please train the model first.")
     
     try:
-        # Load recommendation feedback dataset
-        recommendation_feedback = data_processor.load_recommendation_dataset()
+        # Load recommendation feedback dataset with correct prediction
+        recommendation_feedback = data_processor.load_recommendation_dataset_with_correct_prediction()
         
         if len(recommendation_feedback) == 0:
             raise HTTPException(status_code=400, detail="No recommendation feedback data available for evaluation.")
@@ -1954,6 +1959,199 @@ async def get_model_versions():
             if path and os.path.exists(path)
         ]
     }
+
+@app.get("/model/evaluate-accuracy-with-negatives", tags=["Model"])
+async def evaluate_recommendation_accuracy_with_negatives():
+    """Evaluate model accuracy using recommendation feedback data with negative examples"""
+    if not model_loaded or current_model_instance is None:
+        raise HTTPException(status_code=400, detail="No model available in memory. Please train the model first.")
+    
+    try:
+        # Load recommendation feedback dataset with negative sampling
+        print("📊 Loading recommendation feedback dataset...")
+        recommendation_feedback = data_processor.load_recommendation_dataset_with_correct_prediction()
+        
+        if len(recommendation_feedback) == 0:
+            raise HTTPException(status_code=400, detail="No recommendation feedback data available for evaluation.")
+        
+        print(f"📊 Starting evaluation with {len(recommendation_feedback)} examples...")
+        print(f"📊 Positive examples: {len(recommendation_feedback[recommendation_feedback['source'] == 'recommendation_feedback_positive'])}")
+        print(f"📊 Negative examples: {len(recommendation_feedback[recommendation_feedback['source'] == 'recommendation_feedback_negative'])}")
+        
+        # Debug dataset structure
+        print(f"📊 Dataset columns: {list(recommendation_feedback.columns)}")
+        print(f"📊 Sample data:")
+        print(recommendation_feedback.head(3).to_dict('records'))
+        
+        # Check for required columns
+        required_columns = ['user_id', 'item_id', 'current_item_id', 'source', 'label']
+        missing_columns = [col for col in required_columns if col not in recommendation_feedback.columns]
+        if missing_columns:
+            raise HTTPException(status_code=500, detail=f"Missing required columns: {missing_columns}")
+        
+        # ✅ Add timeout warning
+        print("⚠️ Evaluation may take several minutes due to model inference for each sample...")
+        print("📊 Progress will be shown every 100 samples")
+        
+        # Evaluate model accuracy with negative examples
+        evaluation_results = current_model_instance.evaluate_recommendation_accuracy_with_negatives(recommendation_feedback)
+        
+        if not evaluation_results:
+            raise HTTPException(status_code=500, detail="Evaluation failed - no results returned.")
+        
+        return {
+            "status": "success",
+            "evaluation_results": evaluation_results,
+            "feedback_data_count": len(recommendation_feedback),
+            "positive_examples": len(recommendation_feedback[recommendation_feedback['source'] == 'recommendation_feedback_positive']),
+            "negative_examples": len(recommendation_feedback[recommendation_feedback['source'] == 'recommendation_feedback_negative']),
+            "evaluated_at": datetime.now().isoformat(),
+            "note": "Evaluation limited to 1000 samples for performance. Use /model/evaluate-accuracy for full dataset evaluation."
+        }
+        
+    except Exception as e:
+        print(f"❌ Error in evaluate-accuracy-with-negatives: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error evaluating model accuracy with negative examples: {str(e)}")
+
+@app.post("/recommendations/with-enhanced-ranking", response_model=RecommendationResponse, tags=["Recommendations"])
+async def get_recommendations_with_enhanced_ranking(request: RecommendationRequest, _request: Request):
+    if not is_request_whitelisted(_request):
+        raise HTTPException(status_code=403, detail="Forbidden: Not whitelisted.")
+    """Get recommendations using enhanced ranking (combined retrieval + ranking scores)"""
+    available_model_instance, model_type = get_available_model_instance()
+    if available_model_instance is None:
+        raise HTTPException(
+            status_code=400,
+            detail="No model available in memory. Please train the model first using POST /train"
+        )
+    if available_model_instance.brute_force_index is None:
+        raise HTTPException(
+            status_code=500,
+            detail="Model index not created. Please train the model first."
+        )
+    if available_model_instance.ranking_model is None:
+        raise HTTPException(
+            status_code=500,
+            detail="Ranking model not available. Please ensure ranking model is trained."
+        )
+    if training_status["is_training"] and not training_status["training_completed"]:
+        print(f"🔄 Training in progress ({training_status['current_step']}), using {model_type} model for enhanced recommendations...")
+    try:
+        recommendations = available_model_instance.get_recommendations_with_rank_enhanced_ranking(
+            user_id=request.user_id,
+            current_item_id=request.current_item_id,
+            region=request.region,
+            city=request.city,
+            top_k=request.top_k
+        )
+        recommendation_id = str(uuid.uuid4())
+        recommendation_group = [rec.get("item_id") for rec in recommendations]
+        recommendations = enrich_recommendations_with_program_studi(recommendations, recommendation_id)
+        # Track recommendation metrics (copy dari endpoint with-ranking)
+        recommendation_metrics["total_recommendations"] += 1
+        for rec in recommendations:
+            category = rec.get("category", "unknown")
+            if category not in recommendation_metrics["recommendations_by_category"]:
+                recommendation_metrics["recommendations_by_category"][category] = 0
+            recommendation_metrics["recommendations_by_category"][category] += 1
+            item_id = rec.get("item_id", "unknown")
+            if item_id not in recommendation_metrics["popular_items"]:
+                recommendation_metrics["popular_items"][item_id] = 0
+            recommendation_metrics["popular_items"][item_id] += 1
+        if request.user_id not in recommendation_metrics["user_engagement"]:
+            recommendation_metrics["user_engagement"][request.user_id] = 0
+        recommendation_metrics["user_engagement"][request.user_id] += 1
+        model_status = "current"
+        if training_status["is_training"] and not training_status["training_completed"]:
+            model_status = f"{model_type} (training in progress - {training_status['current_step']})"
+        response_data = RecommendationResponse(
+            user_id=request.user_id,
+            current_item_id=request.current_item_id,
+            recommendations=recommendations,
+            model_info={
+                "model_loaded": model_loaded,
+                "recommendations_count": len(recommendations),
+                "model_status": model_status,
+                "model_version": model_versions["current_version"] if model_type == "current" else model_versions["previous_version"],
+                "training_in_progress": training_status["is_training"],
+                "training_completed": training_status["training_completed"],
+                "training_step": training_status["current_step"],
+                "message": f"Using {model_type} model instance with enhanced ranking in memory" + (" (during training)" if training_status["is_training"] else ""),
+                "method": "enhanced_ranking_with_combined_scores"
+            }
+        )
+        response_dict = response_data.dict()
+        response_dict["recommendation_id"] = recommendation_id
+        response_dict["recommendation_group"] = recommendation_group
+        try:
+            GOOGLE_SCRIPT_URL = os.environ.get("RECOMMENDATION_URL")
+            if GOOGLE_SCRIPT_URL:
+                requests.post(GOOGLE_SCRIPT_URL, json=response_dict, timeout=3)
+        except Exception as log_exc:
+            print(f"[LOGGING ERROR] Failed to log recommendation: {log_exc}")
+        return response_dict
+    except Exception as e:
+        print(f"❌ Error in enhanced recommendations: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error getting enhanced recommendations: {str(e)}")
+
+@app.get("/model/evaluate-accuracy-quick", tags=["Model"])
+async def evaluate_recommendation_accuracy_quick():
+    """Quick evaluation using small sample for faster results"""
+    if not model_loaded or current_model_instance is None:
+        raise HTTPException(status_code=400, detail="No model available in memory. Please train the model first.")
+    
+    try:
+        # Load recommendation feedback dataset with negative sampling
+        print("📊 Loading recommendation feedback dataset for quick evaluation...")
+        recommendation_feedback = data_processor.load_recommendation_dataset_with_correct_prediction()
+        
+        if len(recommendation_feedback) == 0:
+            raise HTTPException(status_code=400, detail="No recommendation feedback data available for evaluation.")
+        
+        # ✅ Use smaller sample for quick evaluation
+        max_quick_samples = 100
+        if len(recommendation_feedback) > max_quick_samples:
+            print(f"📊 Using {max_quick_samples} samples for quick evaluation from {len(recommendation_feedback)} total")
+            recommendation_feedback = recommendation_feedback.sample(n=max_quick_samples, random_state=42)
+        
+        print(f"📊 Quick evaluation with {len(recommendation_feedback)} samples...")
+        print(f"📊 Positive examples: {len(recommendation_feedback[recommendation_feedback['source'] == 'recommendation_feedback_positive'])}")
+        print(f"📊 Negative examples: {len(recommendation_feedback[recommendation_feedback['source'] == 'recommendation_feedback_negative'])}")
+        
+        # Check for required columns
+        required_columns = ['user_id', 'item_id', 'current_item_id', 'source', 'label']
+        missing_columns = [col for col in required_columns if col not in recommendation_feedback.columns]
+        if missing_columns:
+            raise HTTPException(status_code=500, detail=f"Missing required columns: {missing_columns}")
+        
+        print("📊 Starting quick evaluation...")
+        
+        # Evaluate model accuracy with negative examples
+        evaluation_results = current_model_instance.evaluate_recommendation_accuracy_with_negatives(recommendation_feedback)
+        
+        if not evaluation_results:
+            raise HTTPException(status_code=500, detail="Evaluation failed - no results returned.")
+        
+        return {
+            "status": "success",
+            "evaluation_type": "quick",
+            "evaluation_results": evaluation_results,
+            "feedback_data_count": len(recommendation_feedback),
+            "positive_examples": len(recommendation_feedback[recommendation_feedback['source'] == 'recommendation_feedback_positive']),
+            "negative_examples": len(recommendation_feedback[recommendation_feedback['source'] == 'recommendation_feedback_negative']),
+            "evaluated_at": datetime.now().isoformat(),
+            "note": "Quick evaluation using 100 samples. Use /model/evaluate-accuracy-with-negatives for full evaluation."
+        }
+        
+    except Exception as e:
+        print(f"❌ Error in quick evaluation: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error in quick evaluation: {str(e)}")
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

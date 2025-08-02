@@ -13,10 +13,18 @@ class DataProcessor:
         self.item_purchase_url = os.environ.get('ITEM_PURCHASE_URL')
         self.program_studi_url = os.environ.get('PROGRAM_STUDI_URL')
         self.recommendation_dataset_url = os.environ.get('RECOMMENDATION_DATASET_URL')
-        self.recommendation_feedback_dataset_url = os.environ.get('RECOMMENDATION_DATASET_URL')
-        # Optional: error handling jika env tidak di-set
-        if not self.item_view_url or not self.item_purchase_url or not self.program_studi_url:
-            raise ValueError("One or more data URLs are not set in environment variables.")
+        
+        # Improved error handling dengan detail yang lebih jelas
+        missing_vars = []
+        if not self.item_view_url:
+            missing_vars.append('ITEM_VIEW_URL')
+        if not self.item_purchase_url:
+            missing_vars.append('ITEM_PURCHASE_URL')
+        if not self.program_studi_url:
+            missing_vars.append('PROGRAM_STUDI_URL')
+        
+        if missing_vars:
+            raise ValueError(f"Missing environment variables: {', '.join(missing_vars)}. Please set these variables before running the application.")
         
     def load_and_process_data(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """Load and process item view and purchase data"""
@@ -270,84 +278,7 @@ class DataProcessor:
             print(f"❌ Error loading recommendation dataset: {e}")
             return pd.DataFrame()
 
-    def create_enhanced_training_dataset(self, base_dataset: pd.DataFrame, recommendation_dataset: pd.DataFrame = None) -> pd.DataFrame:
-        """Create enhanced training dataset by combining base data with recommendation feedback"""
-        
-        enhanced_dataset = base_dataset.copy()
-        
-        if recommendation_dataset is not None and len(recommendation_dataset) > 0:
-            print("🔄 Enhancing training dataset with recommendation feedback...")
-            
-            # Add recommendation feedback data
-            # We need to match the column structure of the base dataset
-            if 'source' not in enhanced_dataset.columns:
-                enhanced_dataset['source'] = 'base_data'
-            
-            # Prepare recommendation data to match base dataset structure
-            if len(recommendation_dataset) > 0:
-                # Get program studi data for category information
-                program_studi = self.load_program_studi_data()
-                program_studi_dict = program_studi.set_index('item_id').to_dict('index')
-                
-                enhanced_rec_data = []
-                for _, row in recommendation_dataset.iterrows():
-                    item_id = str(row['item_id'])
-                    current_item_id = str(row['current_item_id'])
-                    
-                    # Get category information
-                    item_info = program_studi_dict.get(item_id, {})
-                    current_item_info = program_studi_dict.get(current_item_id, {})
-                    
-                    # Ensure all required columns exist with proper data types
-                    enhanced_rec_data.append({
-                        'user_id': str(row['user_id']),
-                        'item_id': str(item_id),
-                        'current_item_id': str(current_item_id),
-                        'label': float(row['label']),
-                        'rank': int(row.get('rank', 0)),
-                        'timestamp': row['timestamp'],
-                        'source': 'recommendation_feedback',
-                        # Add category information
-                        'category': str(item_info.get('category', 'unknown')),
-                        'category2': str(item_info.get('category2', 'unknown')),
-                        'category3': str(item_info.get('category3', 'unknown')),
-                        'current_category': str(current_item_info.get('category', 'unknown')),
-                        'current_category2': str(current_item_info.get('category2', 'unknown')),
-                        'current_category3': str(current_item_info.get('category3', 'unknown')),
-                        # Add dummy values for required fields
-                        'event_name': 'recommendation_feedback',
-                        'item_category': str(item_info.get('category', 'unknown')),
-                        'item_category2': str(item_info.get('category2', 'unknown')),
-                        'item_category3': str(item_info.get('category3', 'unknown')),
-                        'event_country': 'ID',
-                        'event_region': 'unknown',
-                        'region': 'unknown',
-                        'city': 'unknown',
-                        'item_id_lastview': str(current_item_id),
-                        'item_id_currentview': str(current_item_id),
-                        'timestamp_unix': int(row['timestamp'].timestamp()) if hasattr(row['timestamp'], 'timestamp') else 0
-                    })
-                
-                rec_df = pd.DataFrame(enhanced_rec_data)
-                
-                # Ensure all columns in rec_df match the base dataset
-                for col in enhanced_dataset.columns:
-                    if col not in rec_df.columns:
-                        if col == 'label':
-                            rec_df[col] = 1.0
-                        elif col == 'timestamp_unix':
-                            rec_df[col] = 0
-                        else:
-                            rec_df[col] = 'unknown'
-                
-                # Combine datasets
-                enhanced_dataset = pd.concat([enhanced_dataset, rec_df], ignore_index=True)
-                
-                print(f"✅ Enhanced dataset: {len(enhanced_dataset)} total examples")
-                print(f"📊 Base data: {len(base_dataset)} examples")
-                print(f"📊 Recommendation feedback: {len(rec_df)} examples")
-                
-        return enhanced_dataset
+
 
     def convert_tf_dataset_to_pandas(self, tf_dataset, batch_size=1000):
         """Convert TensorFlow dataset to pandas DataFrame"""
@@ -412,4 +343,307 @@ class DataProcessor:
             
         except Exception as e:
             print(f"❌ Error converting DataFrame to TensorFlow dataset: {e}")
-            return None 
+            return None
+
+    def calculate_rank_based_label(self, rank: int, max_rank: int = 5) -> float:
+        """Calculate label based on rank position with more aggressive differentiation"""
+        # Higher rank (lower position) = higher label
+        # More aggressive differentiation to improve MRR
+        if rank <= 0:
+            return 0.0
+        elif rank == 1:
+            return 1.0
+        elif rank == 2:
+            return 0.8  # Increased from 0.707
+        elif rank == 3:
+            return 0.6  # Increased from 0.577
+        elif rank == 4:
+            return 0.4  # More aggressive drop
+        elif rank == 5:
+            return 0.2  # More aggressive drop
+        else:
+            # For ranks > 5, use exponential decay
+            return max(0.05, (1.0 / rank) ** 0.3)  # More aggressive decay
+
+    def calculate_correct_prediction(self, rank: int) -> float:
+        """Calculate correct prediction probability based on rank with more aggressive differentiation"""
+        # Higher rank (lower position) = higher probability of being correct
+        # More aggressive differentiation to improve MRR
+        if rank <= 0:
+            return 0.0
+        elif rank == 1:
+            return 1.0
+        elif rank == 2:
+            return 0.7  # More aggressive drop from 0.5
+        elif rank == 3:
+            return 0.4  # More aggressive drop
+        elif rank == 4:
+            return 0.2  # More aggressive drop
+        elif rank == 5:
+            return 0.1  # More aggressive drop
+        else:
+            # For ranks > 5, use more aggressive decay
+            return max(0.05, (1.0 / rank) ** 0.5)
+
+    def analyze_rank_distribution(self, recommendation_dataset: pd.DataFrame) -> Dict:
+        """Analyze rank distribution to understand data patterns"""
+        if len(recommendation_dataset) == 0:
+            return {}
+        
+        rank_counts = recommendation_dataset['rank'].value_counts().sort_index()
+        rank_percentages = (rank_counts / len(recommendation_dataset) * 100).round(2)
+        
+        print("📊 Rank Distribution Analysis:")
+        print(f"📊 Total examples: {len(recommendation_dataset)}")
+        print(f"📊 Rank distribution: {dict(rank_counts)}")
+        print(f"📊 Rank percentages: {dict(rank_percentages)}")
+        
+        return {
+            'total_examples': len(recommendation_dataset),
+            'rank_counts': dict(rank_counts),
+            'rank_percentages': dict(rank_percentages),
+            'avg_rank': recommendation_dataset['rank'].mean(),
+            'median_rank': recommendation_dataset['rank'].median()
+        }
+
+    def load_recommendation_dataset_with_correct_prediction(self) -> pd.DataFrame:
+        """Load recommendation feedback dataset with correct prediction information and negative sampling"""
+        if not self.recommendation_dataset_url:
+            print("⚠️ RECOMMENDATION_DATASET_URL not set, skipping recommendation dataset")
+            return pd.DataFrame()
+            
+        try:
+            print("📊 Loading recommendation feedback dataset with correct prediction and negative sampling...")
+            recommendation_df = pd.read_csv(self.recommendation_dataset_url)
+            
+            # Store original count
+            original_count = len(recommendation_df)
+            print(f"📊 Original dataset: {original_count} rows")
+            
+            # Convert current_item_id to string
+            recommendation_df['current_item_id'] = recommendation_df['current_item_id'].astype(str)
+            
+            # Remove duplicates
+            recommendation_df = recommendation_df.drop_duplicates(
+                subset=['user_id', 'current_item_id', 'recommendation_group'],
+                keep='last'
+            )
+            
+            final_count = len(recommendation_df)
+            removed_count = original_count - final_count
+            
+            print(f"📊 After deduplication: {final_count} rows")
+            print(f"📊 Removed {removed_count} duplicate rows")
+            
+            # Get all available items for negative sampling
+            program_studi = self.load_program_studi_data()
+            all_items = set(program_studi['item_id'].astype(str).tolist())
+            
+            # Parse recommendation groups and create training examples
+            training_examples = []
+            positive_examples = 0
+            negative_examples = 0
+            
+            for _, row in recommendation_df.iterrows():
+                user_id = row['user_id']
+                current_item_id = str(row['current_item_id'])
+                recommendation_group = row['recommendation_group']
+                timestamp = pd.to_datetime(row['timestamp'])
+                
+                # Parse recommendation group
+                if isinstance(recommendation_group, str):
+                    try:
+                        rec_items = recommendation_group.strip('[]').replace('"', '').split(',')
+                        rec_items = [item.strip() for item in rec_items if item.strip()]
+                    except:
+                        rec_items = []
+                else:
+                    rec_items = []
+                
+                # Create positive examples (items in recommendation_group)
+                for i, rec_item in enumerate(rec_items):
+                    if rec_item and rec_item != current_item_id:
+                        rank = i + 1
+                        # Calculate correct prediction based on rank
+                        correct_prediction = self.calculate_correct_prediction(rank)
+                        
+                        training_examples.append({
+                            'user_id': user_id,
+                            'item_id': rec_item,
+                            'current_item_id': current_item_id,
+                            'label': 1.0,  # Positive example
+                            'rank': rank,  # Position in recommendation list
+                            'correct_prediction': correct_prediction,  # New column
+                            'timestamp': timestamp,
+                            'source': 'recommendation_feedback_positive'
+                        })
+                        positive_examples += 1
+                
+                # Create negative examples (items NOT in recommendation_group)
+                # Sample 2-3 negative examples per positive example
+                negative_sample_size = min(3, len(rec_items) * 2)  # 2x negative samples
+                
+                # Get items that are NOT in recommendation_group
+                available_negative_items = list(all_items - set(rec_items) - {current_item_id})
+                
+                if len(available_negative_items) > 0:
+                    # Randomly sample negative items
+                    import random
+                    negative_items = random.sample(
+                        available_negative_items, 
+                        min(negative_sample_size, len(available_negative_items))
+                    )
+                    
+                    for neg_item in negative_items:
+                        training_examples.append({
+                            'user_id': user_id,
+                            'item_id': neg_item,
+                            'current_item_id': current_item_id,
+                            'label': 0.0,  # Negative example
+                            'rank': -1,  # No rank for negative examples
+                            'correct_prediction': 0.0,  # Zero for negative examples
+                            'timestamp': timestamp,
+                            'source': 'recommendation_feedback_negative'
+                        })
+                        negative_examples += 1
+                
+            recommendation_training_df = pd.DataFrame(training_examples)
+            
+            if len(recommendation_training_df) > 0:
+                print(f"✅ Loaded {len(recommendation_training_df)} recommendation training examples")
+                print(f"📊 Positive examples: {positive_examples}")
+                print(f"📊 Negative examples: {negative_examples}")
+                print(f"📊 Positive/Negative ratio: {positive_examples/negative_examples:.2f}" if negative_examples > 0 else "📊 No negative examples")
+                print(f"📊 Correct prediction range: {recommendation_training_df['correct_prediction'].min():.3f} - {recommendation_training_df['correct_prediction'].max():.3f}")
+            else:
+                print("⚠️ No recommendation training examples found")
+                
+            return recommendation_training_df
+            
+        except Exception as e:
+            print(f"❌ Error loading recommendation dataset: {e}")
+            return pd.DataFrame()
+
+    def create_enhanced_training_dataset_with_rank(self, base_dataset: pd.DataFrame, recommendation_dataset: pd.DataFrame = None) -> pd.DataFrame:
+        """Create enhanced training dataset with rank-based labels and negative sampling"""
+        
+        enhanced_dataset = base_dataset.copy()
+        
+        if recommendation_dataset is not None and len(recommendation_dataset) > 0:
+            print("🔄 Enhancing training dataset with rank-based feedback and negative sampling...")
+            
+            # Add recommendation feedback data with rank-based labels
+            if 'source' not in enhanced_dataset.columns:
+                enhanced_dataset['source'] = 'base_data'
+            
+            if len(recommendation_dataset) > 0:
+                program_studi = self.load_program_studi_data()
+                program_studi_dict = program_studi.set_index('item_id').to_dict('index')
+                
+                enhanced_rec_data = []
+                positive_count = 0
+                negative_count = 0
+                
+                for _, row in recommendation_dataset.iterrows():
+                    item_id = str(row['item_id'])
+                    current_item_id = str(row['current_item_id'])
+                    rank = int(row.get('rank', 0))
+                    source = str(row.get('source', 'recommendation_feedback'))
+                    
+                    # Get category information
+                    item_info = program_studi_dict.get(item_id, {})
+                    current_item_info = program_studi_dict.get(current_item_id, {})
+                    
+                    # Handle positive and negative examples differently
+                    if source == 'recommendation_feedback_positive' or source == 'recommendation_feedback':
+                        # Positive example - use rank-based label
+                        if rank > 0:
+                            label = self.calculate_rank_based_label(rank)
+                        else:
+                            label = 1.0  # Default positive label
+                        positive_count += 1
+                    elif source == 'recommendation_feedback_negative':
+                        # Negative example - use negative label
+                        label = 0.0  # Negative label
+                        negative_count += 1
+                    else:
+                        # Default case
+                        label = 1.0 if rank > 0 else 0.0
+                    
+                    enhanced_rec_data.append({
+                        'user_id': str(row['user_id']),
+                        'item_id': str(item_id),
+                        'current_item_id': str(current_item_id),
+                        'label': label,  # Use appropriate label based on source
+                        'rank': rank,
+                        'timestamp': row['timestamp'],
+                        'source': source,
+                        'category': str(item_info.get('category', 'unknown')),
+                        'category2': str(item_info.get('category2', 'unknown')),
+                        'category3': str(item_info.get('category3', 'unknown')),
+                        'current_category': str(current_item_info.get('category', 'unknown')),
+                        'current_category2': str(current_item_info.get('category2', 'unknown')),
+                        'current_category3': str(current_item_info.get('category3', 'unknown')),
+                        'event_name': 'recommendation_feedback',
+                        'item_category': str(item_info.get('category', 'unknown')),
+                        'item_category2': str(item_info.get('category2', 'unknown')),
+                        'item_category3': str(item_info.get('category3', 'unknown')),
+                        'event_country': 'ID',
+                        'event_region': 'unknown',
+                        'region': 'unknown',
+                        'city': 'unknown',
+                        'item_id_lastview': str(current_item_id),
+                        'item_id_currentview': str(current_item_id),
+                        'timestamp_unix': int(row['timestamp'].timestamp()) if hasattr(row['timestamp'], 'timestamp') else 0
+                    })
+                
+                rec_df = pd.DataFrame(enhanced_rec_data)
+                
+                # Ensure all columns match
+                for col in enhanced_dataset.columns:
+                    if col not in rec_df.columns:
+                        if col == 'label':
+                            rec_df[col] = 0.5  # Default label
+                        elif col == 'timestamp_unix':
+                            rec_df[col] = 0
+                        else:
+                            rec_df[col] = 'unknown'
+                
+                # Combine datasets
+                enhanced_dataset = pd.concat([enhanced_dataset, rec_df], ignore_index=True)
+                
+                print(f"✅ Enhanced dataset with rank-based labels and negative sampling: {len(enhanced_dataset)} total examples")
+                print(f"📊 Base data: {len(base_dataset)} examples")
+                print(f"📊 Positive feedback examples: {positive_count}")
+                print(f"📊 Negative feedback examples: {negative_count}")
+                print(f"📊 Total feedback examples: {len(rec_df)}")
+                
+        return enhanced_dataset 
+
+    def debug_dataset_structure(self, dataset: pd.DataFrame, name: str = "dataset"):
+        """Debug dataset structure and validate data"""
+        print(f"🔍 Debugging {name} structure:")
+        print(f"📊 Shape: {dataset.shape}")
+        print(f"📊 Columns: {list(dataset.columns)}")
+        print(f"📊 Data types: {dataset.dtypes.to_dict()}")
+        
+        if len(dataset) > 0:
+            print(f"📊 Sample data:")
+            print(dataset.head(3).to_dict('records'))
+            
+            # Check for missing values
+            missing_values = dataset.isnull().sum()
+            if missing_values.sum() > 0:
+                print(f"⚠️ Missing values: {missing_values[missing_values > 0].to_dict()}")
+            
+            # Check source distribution
+            if 'source' in dataset.columns:
+                source_counts = dataset['source'].value_counts()
+                print(f"📊 Source distribution: {source_counts.to_dict()}")
+            
+            # Check label distribution
+            if 'label' in dataset.columns:
+                label_counts = dataset['label'].value_counts()
+                print(f"📊 Label distribution: {label_counts.to_dict()}")
+        
+        return True 
