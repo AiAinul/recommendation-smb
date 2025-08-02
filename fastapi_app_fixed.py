@@ -432,6 +432,9 @@ def train_ranking_model_thread(training_id: str, new_version: str, request: Trai
         dataset, _ = data_processor.load_and_process_data()
         dataset_interaction = data_processor.create_ranking_dataset(dataset)
         
+        # Load recommendation feedback dataset
+        recommendation_feedback = data_processor.load_recommendation_dataset()
+        
         # Convert to TensorFlow datasets with proper data types
         selected_cols = [
             "user_id", "item_id", "category", "category2", "category3",
@@ -467,11 +470,47 @@ def train_ranking_model_thread(training_id: str, new_version: str, request: Trai
         if available_model_instance is None:
             raise Exception("No base model available for ranking training")
         
-        print("🎯 Training ranking model...")
+        print("🎯 Training ranking model with feedback...")
         training_status["current_step"] = "training_ranking"
         
-        # Train the ranking model using the existing user and item models
-        history = available_model_instance.train_ranking_model(ratings, epochs=request.epochs)
+        # Train the ranking model using the existing user and item models with feedback
+        if len(recommendation_feedback) > 0:
+            print(f"📊 Using {len(recommendation_feedback)} recommendation feedback examples")
+            
+            # Try to enhance the dataset with feedback
+            try:
+                # Convert TensorFlow dataset to pandas DataFrame for enhancement
+                ratings_df = data_processor.convert_tf_dataset_to_pandas(ratings)
+                
+                if ratings_df is not None:
+                    # Create enhanced dataset with feedback
+                    enhanced_dataset = data_processor.create_enhanced_training_dataset(
+                        ratings_df, 
+                        recommendation_feedback
+                    )
+                    
+                    # Convert back to TensorFlow dataset
+                    enhanced_ratings = data_processor.convert_pandas_to_tf_dataset(enhanced_dataset)
+                    
+                    if enhanced_ratings is not None:
+                        print(f"✅ Enhanced dataset created: {len(enhanced_dataset)} rows")
+                        history = available_model_instance.train_ranking_model(enhanced_ratings, epochs=request.epochs)
+                    else:
+                        print("⚠️ Failed to convert enhanced dataset to TensorFlow format")
+                        print("📊 Falling back to standard training without feedback")
+                        history = available_model_instance.train_ranking_model(ratings, epochs=request.epochs)
+                else:
+                    print("⚠️ Could not convert TensorFlow dataset to DataFrame")
+                    print("📊 Falling back to standard training without feedback")
+                    history = available_model_instance.train_ranking_model(ratings, epochs=request.epochs)
+                
+            except Exception as e:
+                print(f"⚠️ Error enhancing dataset with feedback: {e}")
+                print("📊 Falling back to standard training without feedback")
+                history = available_model_instance.train_ranking_model(ratings, epochs=request.epochs)
+        else:
+            print("📊 No recommendation feedback available, using standard training")
+            history = available_model_instance.train_ranking_model(ratings, epochs=request.epochs)
         
         # Setelah training selesai, capture metrics
         global ranking_metrics
@@ -1873,6 +1912,47 @@ async def get_program_studi_cache_status():
         "last_update": program_studi_last_update,
         "cache_size": len(program_studi_df) if program_studi_df is not None else 0,
         "data_source": data_processor.program_studi_url
+    }
+
+@app.get("/model/evaluate-accuracy", tags=["Model"])
+async def evaluate_recommendation_accuracy():
+    """Evaluate model accuracy using recommendation feedback data"""
+    if not model_loaded or current_model_instance is None:
+        raise HTTPException(status_code=400, detail="No model available in memory. Please train the model first.")
+    
+    try:
+        # Load recommendation feedback dataset
+        recommendation_feedback = data_processor.load_recommendation_dataset()
+        
+        if len(recommendation_feedback) == 0:
+            raise HTTPException(status_code=400, detail="No recommendation feedback data available for evaluation.")
+        
+        # Evaluate model accuracy
+        evaluation_results = current_model_instance.evaluate_recommendation_accuracy(recommendation_feedback)
+        
+        return {
+            "status": "success",
+            "evaluation_results": evaluation_results,
+            "feedback_data_count": len(recommendation_feedback),
+            "evaluated_at": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error evaluating model accuracy: {str(e)}")
+
+@app.get("/model/versions", tags=["Model"])
+async def get_model_versions():
+    """Get information about available model versions"""
+    return {
+        "current_model": model_versions["current"],
+        "previous_model": model_versions["previous"],
+        "backup_model": model_versions["backup"],
+        "model_loaded": model_loaded,
+        "training_in_progress": training_in_progress,
+        "available_models": [
+            path for path in model_versions.values() 
+            if path and os.path.exists(path)
+        ]
     }
 
 if __name__ == "__main__":

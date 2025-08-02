@@ -58,9 +58,6 @@ def train_model_directly():
         # Convert to TensorFlow dataset
         ratings = tf.data.Dataset.from_tensor_slices(dict(dataset_interaction[selected_cols]))
         
-        # Create 2D tensor dataset for ranking
-        ranking_dataset = data_processor.create_ranking_dataset_2d(dataset_interaction)
-        
         # Load program studi data
         program_studi = data_processor.load_program_studi_data()
         
@@ -78,9 +75,28 @@ def train_model_directly():
         print("🎯 Training model...")
         recommendation_model.train_model(ratings, epochs=15)
         
-        # Train ranking model with 2D approach
-        print("🎯 Training ranking model with 2D approach...")
-        recommendation_model.train_ranking_model_2d(ranking_dataset, epochs=10)
+        # Train ranking model with standard approach
+        print("🎯 Training ranking model...")
+        ranking_dataset = data_processor.create_ranking_dataset(dataset)
+        
+        # Convert ranking dataset to TensorFlow format
+        ranking_selected_cols = [
+            "user_id", "item_id", "category", "category2", "category3",
+            "region", 'city', "item_id_lastview", "item_id_currentview", "label","timestamp_unix"
+        ]
+        
+        # Ensure ranking data is properly formatted
+        for col in ranking_selected_cols:
+            if col == "label":
+                ranking_dataset[col] = ranking_dataset[col].astype(np.float32)
+            elif col == "timestamp_unix":
+                ranking_dataset[col] = ranking_dataset[col].astype(np.int64)
+            else:
+                ranking_dataset[col] = ranking_dataset[col].astype(str)
+        
+        ranking_tf_dataset = tf.data.Dataset.from_tensor_slices(dict(ranking_dataset[ranking_selected_cols]))
+        
+        recommendation_model.train_ranking_model(ranking_tf_dataset, epochs=10)
         
         # Create index and lookup
         print(" Creating index and lookup...")

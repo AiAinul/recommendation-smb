@@ -322,61 +322,145 @@ class RecommendationModel:
             )
         return history
 
-    def train_ranking_model_2d(self, ranking_dataset, test_dataset=None, epochs=10):
-        """Train the ranking model with 2D tensor format for NDCG and MRR"""
+    def train_ranking_model_with_feedback(self, ranking_dataset, recommendation_feedback_dataset=None, test_dataset=None, epochs=10):
+        """Train the ranking model with recommendation feedback data"""
         if self.ranking_model is None:
             raise ValueError("Ranking model not built. Call build_model() first.")
         
-        # Convert dataset to 2D format for TensorFlow Ranking
-        def prepare_2d_data(batch):
-            # Get the number of items for this user
-            num_items = len(batch['item_ids'])
-            
-            # Create user features (repeated for each item)
-            user_features = {
-                'user_id': [batch['user_id']] * num_items,
-                'region': [batch['region']] * num_items,
-                'city': [batch['city']] * num_items,
-                'item_id_currentview': [batch['item_id_currentview']] * num_items,
-                'timestamp_unix': [batch['timestamp_unix']] * num_items,
-                'item_id_lastview': [batch['item_id_lastview']] * num_items
-            }
-            
-            # Create item features (different for each item)
-            item_features = {
-                'item_id': batch['item_ids'],
-                'category': batch['categories'],
-                'category2': batch['categories2'],
-                'category3': batch['categories3'],
-                'label': batch['labels']
-            }
-            
-            # Create 2D tensor record
-            record = {
-                'user_features': user_features,
-                'item_features': item_features,
-                'labels_2d': tf.reshape(tf.constant(batch['labels']), [1, -1]),  # [1, num_items]
-                'num_items': num_items
-            }
-            
-            return record
+        print("🎯 Training ranking model with recommendation feedback...")
         
-        # Process the dataset
-        processed_dataset = ranking_dataset.map(prepare_2d_data)
+        # If we have recommendation feedback, enhance the training data
+        if recommendation_feedback_dataset is not None and len(recommendation_feedback_dataset) > 0:
+            print(f"📊 Using {len(recommendation_feedback_dataset)} recommendation feedback examples")
+            
+            # Use data processor for conversion
+            from data_processing import DataProcessor
+            data_processor = DataProcessor()
+            
+            # Convert TensorFlow dataset to pandas for enhancement
+            ranking_df = data_processor.convert_tf_dataset_to_pandas(ranking_dataset)
+            
+            if ranking_df is not None:
+                # Create enhanced dataset with feedback
+                enhanced_dataset = data_processor.create_enhanced_training_dataset(
+                    ranking_df, 
+                    recommendation_feedback_dataset
+                )
+                
+                # Convert back to TensorFlow dataset
+                enhanced_tf_dataset = data_processor.convert_pandas_to_tf_dataset(enhanced_dataset)
+                
+                if enhanced_tf_dataset is not None:
+                    print(f"✅ Enhanced dataset created: {len(enhanced_dataset)} rows")
+                    
+                    # Train with enhanced dataset
+                    if test_dataset is not None:
+                        history = self.ranking_model.fit(
+                            enhanced_tf_dataset.batch(4096),
+                            validation_data=test_dataset.batch(4096),
+                            epochs=epochs
+                        )
+                    else:
+                        history = self.ranking_model.fit(
+                            enhanced_tf_dataset.batch(4096),
+                            epochs=epochs
+                        )
+                else:
+                    print("⚠️ Failed to convert enhanced dataset to TensorFlow format")
+                    print("📊 Falling back to standard training without feedback")
+                    history = self._train_ranking_model_standard(ranking_dataset, test_dataset, epochs)
+            else:
+                print("⚠️ Could not convert TensorFlow dataset to DataFrame")
+                print("📊 Falling back to standard training without feedback")
+                history = self._train_ranking_model_standard(ranking_dataset, test_dataset, epochs)
+        else:
+            print("📊 No recommendation feedback available, using standard training")
+            history = self._train_ranking_model_standard(ranking_dataset, test_dataset, epochs)
         
+        return history
+
+    def _train_ranking_model_standard(self, ranking_dataset, test_dataset=None, epochs=10):
+        """Standard training method without feedback enhancement"""
         if test_dataset is not None:
-            test_processed = test_dataset.map(prepare_2d_data)
             history = self.ranking_model.fit(
-                processed_dataset.batch(4096),
-                validation_data=test_processed.batch(4096),
+                ranking_dataset.batch(4096),
+                validation_data=test_dataset.batch(4096),
                 epochs=epochs
             )
         else:
             history = self.ranking_model.fit(
-                processed_dataset.batch(4096),
+                ranking_dataset.batch(4096),
                 epochs=epochs
             )
         return history
+
+    def evaluate_recommendation_accuracy(self, test_recommendations_df):
+        """Evaluate model accuracy using recommendation feedback data"""
+        if self.ranking_model is None:
+            print("❌ No ranking model available for evaluation")
+            return {}
+        
+        print("📊 Evaluating recommendation accuracy...")
+        
+        correct_predictions = 0
+        total_predictions = 0
+        rank_accuracy = {}
+        
+        for _, row in test_recommendations_df.iterrows():
+            user_id = row['user_id']
+            current_item_id = str(row['current_item_id'])
+            recommendation_group = row['recommendation_group']
+            
+            # Parse recommendation group
+            if isinstance(recommendation_group, str):
+                try:
+                    rec_items = recommendation_group.strip('[]').replace('"', '').split(',')
+                    rec_items = [item.strip() for item in rec_items if item.strip()]
+                except:
+                    rec_items = []
+            else:
+                rec_items = []
+            
+            # Get model predictions
+            try:
+                predictions = self.get_recommendations_with_ranking(
+                    user_id, current_item_id, "unknown", "unknown", top_k=10
+                )
+                
+                predicted_items = [pred['item_id'] for pred in predictions]
+                
+                # Check if any recommended items match the actual recommendations
+                matches = set(rec_items) & set(predicted_items)
+                if matches:
+                    correct_predictions += 1
+                    
+                    # Calculate rank accuracy
+                    for item in matches:
+                        pred_rank = next((i+1 for i, pred in enumerate(predictions) if pred['item_id'] == item), -1)
+                        if pred_rank > 0:
+                            rank_accuracy[pred_rank] = rank_accuracy.get(pred_rank, 0) + 1
+                
+                total_predictions += 1
+                
+            except Exception as e:
+                print(f"⚠️ Error evaluating prediction for user {user_id}: {e}")
+                continue
+        
+        accuracy = (correct_predictions / total_predictions * 100) if total_predictions > 0 else 0
+        
+        evaluation_results = {
+            'accuracy': accuracy,
+            'correct_predictions': correct_predictions,
+            'total_predictions': total_predictions,
+            'rank_accuracy': rank_accuracy
+        }
+        
+        print(f"✅ Evaluation Results:")
+        print(f"📊 Overall Accuracy: {accuracy:.2f}%")
+        print(f"📊 Correct Predictions: {correct_predictions}/{total_predictions}")
+        print(f"📊 Rank Accuracy: {rank_accuracy}")
+        
+        return evaluation_results
 
     def create_index(self, movies_dataset):
         """Create brute force index for recommendations"""

@@ -12,7 +12,8 @@ class DataProcessor:
         self.item_view_url = os.environ.get('ITEM_VIEW_URL')
         self.item_purchase_url = os.environ.get('ITEM_PURCHASE_URL')
         self.program_studi_url = os.environ.get('PROGRAM_STUDI_URL')
-
+        self.recommendation_dataset_url = os.environ.get('RECOMMENDATION_DATASET_URL')
+        self.recommendation_feedback_dataset_url = os.environ.get('RECOMMENDATION_DATASET_URL')
         # Optional: error handling jika env tidak di-set
         if not self.item_view_url or not self.item_purchase_url or not self.program_studi_url:
             raise ValueError("One or more data URLs are not set in environment variables.")
@@ -190,134 +191,225 @@ class DataProcessor:
         print(f"✅ Timestamp normalization layer created and adapted")
         return timestamp_normalization_layer
 
-
-
-    def create_ranking_dataset_2d(self, dataset: pd.DataFrame) -> tf.data.Dataset:
-        """
-        Create proper 2D tensor dataset for TensorFlow Ranking
-        Returns dataset with 2D tensors for labels and predictions
-        Uses users with more than 5 items for ranking training
-        """
-        print("🔄 Creating proper 2D ranking dataset (users with >3 items)...")
-        
-        # Filter users with more than 5 items for ranking
-        user_item_counts = dataset.groupby('user_id')['item_id'].nunique()
-        users_for_ranking = user_item_counts[user_item_counts > 5].index
-        dataset_ranking = dataset[dataset['user_id'].isin(users_for_ranking)]
-        
-        print(f"📊 Ranking dataset: {len(dataset_ranking)} interactions from {len(users_for_ranking)} users with >3 items")
-        
-        # Group by user_id
-        user_groups = dataset_ranking.groupby('user_id')
-        
-        ranking_data = []
-        
-        for user_id, group in user_groups:
-            if len(group) < 2:  # Skip users with less than 2 interactions
-                continue
+    def load_recommendation_dataset(self) -> pd.DataFrame:
+        """Load and process recommendation feedback dataset"""
+        if not self.recommendation_dataset_url:
+            print("⚠️ RECOMMENDATION_DATASET_URL not set, skipping recommendation dataset")
+            return pd.DataFrame()
+            
+        try:
+            print("📊 Loading recommendation feedback dataset...")
+            recommendation_df = pd.read_csv(self.recommendation_dataset_url)
+            
+            # Store original count for accurate calculation
+            original_count = len(recommendation_df)
+            print(f"📊 Original dataset: {original_count} rows")
+            
+            # Convert current_item_id to string for consistent comparison
+            recommendation_df['current_item_id'] = recommendation_df['current_item_id'].astype(str)
+            
+            # Remove duplicates based on the specified columns, keeping the last occurrence
+            recommendation_df = recommendation_df.drop_duplicates(
+                subset=['user_id', 'current_item_id', 'recommendation_group'],
+                keep='last'
+            )
+            
+            final_count = len(recommendation_df)
+            removed_count = original_count - final_count
+            
+            print(f"📊 After deduplication: {final_count} rows")
+            print(f"📊 Removed {removed_count} duplicate rows")
+            
+            # Parse recommendation groups and create training examples
+            training_examples = []
+            
+            for _, row in recommendation_df.iterrows():
+                user_id = row['user_id']
+                current_item_id = str(row['current_item_id'])
+                recommendation_group = row['recommendation_group']
+                timestamp = pd.to_datetime(row['timestamp'])
                 
-            # Sort by timestamp
-            group = group.sort_values('timestamp_unix')
-            
-            # Create 2D tensors for labels and item features
-            num_items = len(group)
-            
-            # Create user features (same for all items)
-            user_features = {
-                'user_id': [user_id] * num_items,
-                'region': [group['region'].iloc[0]] * num_items,
-                'city': [group['city'].iloc[0]] * num_items,
-                'item_id_currentview': [group['item_id'].iloc[-1]] * num_items,
-                'timestamp_unix': [group['timestamp_unix'].iloc[-1]] * num_items,
-                'item_id_lastview': [group['item_id'].iloc[-2] if len(group) > 1 else group['item_id'].iloc[-1]] * num_items
-            }
-            
-            # Create item features (different for each item)
-            item_features = {
-                'item_id': group['item_id'].tolist(),
-                'category': group['category'].tolist(),
-                'category2': group['category2'].tolist(),
-                'category3': group['category3'].tolist(),
-                'label': group['label'].tolist()
-            }
-            
-            # Create 2D tensor record
-            record = {
-                'user_features': user_features,
-                'item_features': item_features,
-                'labels_2d': tf.reshape(tf.constant(group['label'].tolist()), [1, -1]),  # [1, num_items]
-                'num_items': num_items
-            }
-            
-            ranking_data.append(record)
-        
-        # Convert to TensorFlow dataset
-        ranking_dataset = tf.data.Dataset.from_tensor_slices(ranking_data)
-        
-        print(f"✅ Created proper 2D ranking dataset: {len(ranking_data)} user groups")
-        return ranking_dataset
-
-    def create_retrieval_dataset_2d(self, dataset: pd.DataFrame) -> tf.data.Dataset:
-        """
-        Create proper 2D tensor dataset for retrieval
-        Returns dataset with 2D tensors for labels and predictions
-        Uses users with minimum 3 items for retrieval
-        """
-        print("🔄 Creating proper 2D retrieval dataset (users with >=3 items)...")
-        
-        # Filter users with minimum 3 items for retrieval
-        user_item_counts = dataset.groupby('user_id')['item_id'].nunique()
-        users_for_retrieval = user_item_counts[user_item_counts >= 3].index
-        dataset_retrieval = dataset[dataset['user_id'].isin(users_for_retrieval)]
-        
-        print(f"📊 Retrieval dataset: {len(dataset_retrieval)} interactions from {len(users_for_retrieval)} users with >=3 items")
-        
-        # Group by user_id
-        user_groups = dataset_retrieval.groupby('user_id')
-        
-        retrieval_data = []
-        
-        for user_id, group in user_groups:
-            if len(group) < 2:  # Skip users with less than 2 interactions
-                continue
+                # Parse recommendation group (convert string representation to list)
+                if isinstance(recommendation_group, str):
+                    try:
+                        # Remove brackets and quotes, split by comma
+                        rec_items = recommendation_group.strip('[]').replace('"', '').split(',')
+                        rec_items = [item.strip() for item in rec_items if item.strip()]
+                    except:
+                        rec_items = []
+                else:
+                    rec_items = []
                 
-            # Sort by timestamp
-            group = group.sort_values('timestamp_unix')
+                # Create positive examples (items that were recommended and potentially clicked)
+                for i, rec_item in enumerate(rec_items):
+                    if rec_item and rec_item != current_item_id:
+                        training_examples.append({
+                            'user_id': user_id,
+                            'item_id': rec_item,
+                            'current_item_id': current_item_id,
+                            'label': 1.0,  # Positive example
+                            'rank': i + 1,  # Position in recommendation list
+                            'timestamp': timestamp,
+                            'source': 'recommendation_feedback'
+                        })
+                
+                # Create negative examples (items not in recommendation list)
+                # We'll add some negative sampling later
+                
+            recommendation_training_df = pd.DataFrame(training_examples)
             
-            # Create 2D tensors for labels and item features
-            num_items = len(group)
+            if len(recommendation_training_df) > 0:
+                print(f"✅ Loaded {len(recommendation_training_df)} recommendation training examples")
+                print(f"📊 Positive examples: {len(recommendation_training_df[recommendation_training_df['label'] == 1.0])}")
+            else:
+                print("⚠️ No recommendation training examples found")
+                
+            return recommendation_training_df
             
-            # Create user features (same for all items)
-            user_features = {
-                'user_id': [user_id] * num_items,
-                'region': [group['region'].iloc[0]] * num_items,
-                'city': [group['city'].iloc[0]] * num_items,
-                'item_id_currentview': [group['item_id'].iloc[-1]] * num_items,
-                'timestamp_unix': [group['timestamp_unix'].iloc[-1]] * num_items,
-                'item_id_lastview': [group['item_id'].iloc[-2] if len(group) > 1 else group['item_id'].iloc[-1]] * num_items
-            }
-            
-            # Create item features (different for each item)
-            item_features = {
-                'item_id': group['item_id'].tolist(),
-                'category': group['category'].tolist(),
-                'category2': group['category2'].tolist(),
-                'category3': group['category3'].tolist(),
-                'label': group['label'].tolist()
-            }
-            
-            # Create 2D tensor record
-            record = {
-                'user_features': user_features,
-                'item_features': item_features,
-                'labels_2d': tf.reshape(tf.constant(group['label'].tolist()), [1, -1]),  # [1, num_items]
-                'num_items': num_items
-            }
-            
-            retrieval_data.append(record)
+        except Exception as e:
+            print(f"❌ Error loading recommendation dataset: {e}")
+            return pd.DataFrame()
+
+    def create_enhanced_training_dataset(self, base_dataset: pd.DataFrame, recommendation_dataset: pd.DataFrame = None) -> pd.DataFrame:
+        """Create enhanced training dataset by combining base data with recommendation feedback"""
         
-        # Convert to TensorFlow dataset
-        retrieval_dataset = tf.data.Dataset.from_tensor_slices(retrieval_data)
+        enhanced_dataset = base_dataset.copy()
         
-        print(f"✅ Created proper 2D retrieval dataset: {len(retrieval_data)} user groups")
-        return retrieval_dataset 
+        if recommendation_dataset is not None and len(recommendation_dataset) > 0:
+            print("🔄 Enhancing training dataset with recommendation feedback...")
+            
+            # Add recommendation feedback data
+            # We need to match the column structure of the base dataset
+            if 'source' not in enhanced_dataset.columns:
+                enhanced_dataset['source'] = 'base_data'
+            
+            # Prepare recommendation data to match base dataset structure
+            if len(recommendation_dataset) > 0:
+                # Get program studi data for category information
+                program_studi = self.load_program_studi_data()
+                program_studi_dict = program_studi.set_index('item_id').to_dict('index')
+                
+                enhanced_rec_data = []
+                for _, row in recommendation_dataset.iterrows():
+                    item_id = str(row['item_id'])
+                    current_item_id = str(row['current_item_id'])
+                    
+                    # Get category information
+                    item_info = program_studi_dict.get(item_id, {})
+                    current_item_info = program_studi_dict.get(current_item_id, {})
+                    
+                    # Ensure all required columns exist with proper data types
+                    enhanced_rec_data.append({
+                        'user_id': str(row['user_id']),
+                        'item_id': str(item_id),
+                        'current_item_id': str(current_item_id),
+                        'label': float(row['label']),
+                        'rank': int(row.get('rank', 0)),
+                        'timestamp': row['timestamp'],
+                        'source': 'recommendation_feedback',
+                        # Add category information
+                        'category': str(item_info.get('category', 'unknown')),
+                        'category2': str(item_info.get('category2', 'unknown')),
+                        'category3': str(item_info.get('category3', 'unknown')),
+                        'current_category': str(current_item_info.get('category', 'unknown')),
+                        'current_category2': str(current_item_info.get('category2', 'unknown')),
+                        'current_category3': str(current_item_info.get('category3', 'unknown')),
+                        # Add dummy values for required fields
+                        'event_name': 'recommendation_feedback',
+                        'item_category': str(item_info.get('category', 'unknown')),
+                        'item_category2': str(item_info.get('category2', 'unknown')),
+                        'item_category3': str(item_info.get('category3', 'unknown')),
+                        'event_country': 'ID',
+                        'event_region': 'unknown',
+                        'region': 'unknown',
+                        'city': 'unknown',
+                        'item_id_lastview': str(current_item_id),
+                        'item_id_currentview': str(current_item_id),
+                        'timestamp_unix': int(row['timestamp'].timestamp()) if hasattr(row['timestamp'], 'timestamp') else 0
+                    })
+                
+                rec_df = pd.DataFrame(enhanced_rec_data)
+                
+                # Ensure all columns in rec_df match the base dataset
+                for col in enhanced_dataset.columns:
+                    if col not in rec_df.columns:
+                        if col == 'label':
+                            rec_df[col] = 1.0
+                        elif col == 'timestamp_unix':
+                            rec_df[col] = 0
+                        else:
+                            rec_df[col] = 'unknown'
+                
+                # Combine datasets
+                enhanced_dataset = pd.concat([enhanced_dataset, rec_df], ignore_index=True)
+                
+                print(f"✅ Enhanced dataset: {len(enhanced_dataset)} total examples")
+                print(f"📊 Base data: {len(base_dataset)} examples")
+                print(f"📊 Recommendation feedback: {len(rec_df)} examples")
+                
+        return enhanced_dataset
+
+    def convert_tf_dataset_to_pandas(self, tf_dataset, batch_size=1000):
+        """Convert TensorFlow dataset to pandas DataFrame"""
+        print("🔄 Converting TensorFlow dataset to pandas DataFrame...")
+        
+        try:
+            ratings_data = []
+            for batch in tf_dataset.batch(batch_size):
+                # Convert batch to dictionary with proper data types
+                batch_data = {}
+                for key, value in batch.items():
+                    if hasattr(value, 'numpy'):
+                        # Convert to list of strings for string columns, keep numeric as is
+                        if key in ['user_id', 'item_id', 'category', 'category2', 'category3', 
+                                 'region', 'city', 'item_id_lastview', 'item_id_currentview']:
+                            batch_data[key] = [str(x) for x in value.numpy()]
+                        else:
+                            batch_data[key] = value.numpy().tolist()
+                
+                # Create DataFrame from this batch
+                batch_df = pd.DataFrame(batch_data)
+                ratings_data.append(batch_df)
+            
+            # Combine all batches
+            if ratings_data:
+                ratings_df = pd.concat(ratings_data, ignore_index=True)
+                print(f"✅ Converted TensorFlow dataset to DataFrame: {len(ratings_df)} rows")
+                return ratings_df
+            else:
+                print("⚠️ No data in TensorFlow dataset")
+                return None
+                
+        except Exception as e:
+            print(f"❌ Error converting TensorFlow dataset: {e}")
+            return None
+
+    def convert_pandas_to_tf_dataset(self, df, selected_cols=None):
+        """Convert pandas DataFrame to TensorFlow dataset with proper data types"""
+        if selected_cols is None:
+            selected_cols = [
+                "user_id", "item_id", "category", "category2", "category3",
+                "region", 'city', "item_id_lastview", "item_id_currentview", "label", "timestamp_unix"
+            ]
+        
+        print("🔄 Converting pandas DataFrame to TensorFlow dataset...")
+        
+        try:
+            # Ensure all data is properly formatted
+            for col in selected_cols:
+                if col in df.columns:
+                    if col == "label":
+                        df[col] = df[col].astype(np.float32)
+                    elif col == "timestamp_unix":
+                        df[col] = df[col].astype(np.int64)
+                    else:
+                        df[col] = df[col].astype(str)
+            
+            # Convert to TensorFlow dataset
+            tf_dataset = tf.data.Dataset.from_tensor_slices(dict(df[selected_cols]))
+            print(f"✅ Converted DataFrame to TensorFlow dataset: {len(df)} rows")
+            return tf_dataset
+            
+        except Exception as e:
+            print(f"❌ Error converting DataFrame to TensorFlow dataset: {e}")
+            return None 
