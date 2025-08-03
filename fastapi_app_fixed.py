@@ -195,6 +195,20 @@ previous_model_instance = None
 model_loaded = False
 training_in_progress = False
 
+# Global variables untuk evaluation status
+evaluation_status = {
+    "is_evaluating": False,
+    "evaluation_id": None,
+    "progress": 0,
+    "current_step": "idle",
+    "start_time": None,
+    "estimated_completion": None,
+    "evaluation_results": None,
+    "evaluation_completed": False,
+    "completion_time": None,
+    "error": None
+}
+
 # Model versioning system (in-memory)
 model_versions = {
     "current": None,
@@ -435,6 +449,11 @@ def train_ranking_model_thread(training_id: str, new_version: str, request: Trai
         # Load recommendation feedback dataset with correct prediction
         recommendation_feedback = data_processor.load_recommendation_dataset_with_correct_prediction()
         
+        # Check if recommendation feedback is available
+        if len(recommendation_feedback) == 0:
+            print("⚠️ No recommendation feedback data available, using base dataset only")
+            recommendation_feedback = None
+        
         # Convert to TensorFlow datasets with proper data types
         selected_cols = [
             "user_id", "item_id", "category", "category2", "category3",
@@ -519,40 +538,58 @@ def train_ranking_model_thread(training_id: str, new_version: str, request: Trai
         
         # Setelah training selesai, capture metrics
         global ranking_metrics
-        if history and hasattr(history, 'history'):
+        
+        # Check if training was successful
+        if history is None:
+            print("❌ Training failed - no history returned")
+            ranking_metrics.update({
+                "ndcg": 0.0,
+                "mrr": 0.0,
+                "total_loss": 0.0,
+                "regularization_loss": 0.0,
+                "last_updated": datetime.now().isoformat(),
+                "error": "Training failed - no history returned"
+            })
+        elif history and hasattr(history, 'history') and history.history:
             print(f"📊 Ranking training history keys: {list(history.history.keys())}")
             print(f"📊 Ranking training history values: {history.history}")
             
+            # Try different metric keys that might be available
             ndcg_key = "metric/ndcg"
             mrr_key = "metric/mrr"
-            map_key = "metric/map"
-            precision_key = "metric/precision"
+            ndcg5_key = "metric/ndcg@5"
+            mrr5_key = "metric/mrr@5"
             loss_key = "loss"
             regularization_loss_key = "regularization_loss"
             
-            # Get the last epoch values
-            ndcg_value = history.history.get(ndcg_key, [0.0])[-1]
-            mrr_value = history.history.get(mrr_key, [0.0])[-1]
-            map_value = history.history.get(map_key, [0.0])[-1]
-            precision_value = history.history.get(precision_key, [0.0])[-1]
+            # Get the last epoch values with fallbacks
+            ndcg_value = history.history.get(ndcg_key, history.history.get(ndcg5_key, [0.0]))[-1]
+            mrr_value = history.history.get(mrr_key, history.history.get(mrr5_key, [0.0]))[-1]
             loss_value = history.history.get(loss_key, [0.0])[-1]
             regularization_loss_value = history.history.get(regularization_loss_key, [0.0])[-1]
             
             ranking_metrics.update({
                 "ndcg": ndcg_value,
                 "mrr": mrr_value,
-                "map": map_value,
-                "precision": precision_value,
                 "total_loss": loss_value,
                 "regularization_loss": regularization_loss_value,
                 "last_updated": datetime.now().isoformat()
             })
-            print(f"📊 Ranking metrics updated: ndcg={ndcg_value:.4f}, mrr={mrr_value:.4f}, map={map_value:.4f}, precision={precision_value:.4f}, loss={loss_value:.4f}, reg_loss={regularization_loss_value:.4f}")
+            print(f"📊 Ranking metrics updated: ndcg={ndcg_value:.4f}, mrr={mrr_value:.4f}, loss={loss_value:.4f}, reg_loss={regularization_loss_value:.4f}")
         else:
             print(f"❌ No ranking history object or history.history not available")
             print(f"📊 Ranking history object type: {type(history)}")
             if history:
                 print(f"📊 Ranking history object attributes: {dir(history)}")
+            # Set default values if no history
+            ranking_metrics.update({
+                "ndcg": 0.0,
+                "mrr": 0.0,
+                "total_loss": 0.0,
+                "regularization_loss": 0.0,
+                "last_updated": datetime.now().isoformat(),
+                "error": "No training history available"
+            })
         
         print("✅ Ranking model training completed successfully!")
         print("🔄 Ranking model is now available for recommendations with ranking")
@@ -738,7 +775,13 @@ async def root():
             "model_info": "/model/info",
             "recommendations": "/recommendations",
             "train": "/train",
-            "data_stats": "/data/stats"
+            "data_stats": "/data/stats",
+            "evaluation": {
+                "start_evaluation": "/model/evaluate-accuracy-with-negatives",
+                "quick_evaluation": "/model/evaluate-accuracy-quick",
+                "evaluation_status": "/model/evaluation-status",
+                "evaluation_results": "/model/evaluation-results"
+            }
         }
     }
 
@@ -751,8 +794,10 @@ async def health_check():
         "status": "healthy",
         "model_loaded": available_model_instance is not None,
         "training_in_progress": training_status["is_training"],
+        "evaluation_in_progress": evaluation_status["is_evaluating"],
         "model_type": model_type,
-        "model_ready": available_model_instance is not None and available_model_instance.brute_force_index is not None
+        "model_ready": available_model_instance is not None and available_model_instance.brute_force_index is not None,
+        "evaluation_ready": evaluation_status["evaluation_completed"]
     }
 
 @app.get("/model/info", response_model=ModelInfo, tags=["Model"])
@@ -1481,10 +1526,10 @@ async def get_main_dashboard():
                     "factorized_top_k/top_1_categorical_accuracy": f"{retrieval_metrics['factorized_top_k/top_1_categorical_accuracy']:.4f}" if model_loaded else "Not trained",
                     "total_loss": f"{retrieval_metrics['total_loss']:.4f}" if model_loaded else "Not trained"
                 },
-                "ranking_metrics": {
-                    "ndcg": f"{ranking_metrics['ndcg']:.4f}" if model_loaded else "Not trained", 
-                    "mrr": f"{ranking_metrics['mrr']:.4f}" if model_loaded else "Not trained",
-                    "total_loss": f"{ranking_metrics['total_loss']:.4f}" if model_loaded else "Not trained"
+                                "ranking_metrics": {
+                    "ndcg": f"{ranking_metrics['ndcg']:.4f}" if model_loaded and ranking_metrics['ndcg'] > 0 else "Not trained",
+                    "mrr": f"{ranking_metrics['mrr']:.4f}" if model_loaded and ranking_metrics['mrr'] > 0 else "Not trained",
+                    "total_loss": f"{ranking_metrics['total_loss']:.4f}" if model_loaded and ranking_metrics['total_loss'] > 0 else "Not trained"
                 }
             },
             "real_data_overview": converted_stats
@@ -1717,10 +1762,13 @@ async def get_model_status():
         "available_model_type": model_type,
         "training_in_progress": training_status["is_training"],
         "training_completed": training_status["training_completed"],
+        "evaluation_in_progress": evaluation_status["is_evaluating"],
+        "evaluation_completed": evaluation_status["evaluation_completed"],
         "current_model_version": model_versions["current_version"],
         "previous_model_version": model_versions["previous_version"],
         "recommendations_available": model_ready,
         "can_use_during_training": model_ready,
+        "can_use_during_evaluation": model_ready,
         "model_status": "ready" if model_ready else "not_ready",
         "memory_usage": {
             "current_model": "loaded" if current_model_instance is not None else "not_loaded",
@@ -1732,6 +1780,12 @@ async def get_model_status():
             "current_epoch": training_status["current_epoch"],
             "total_epochs": training_status["total_epochs"],
             "current_step": training_status["current_step"]
+        },
+        "evaluation_status": {
+            "is_evaluating": evaluation_status["is_evaluating"],
+            "progress": evaluation_status["progress"],
+            "current_step": evaluation_status["current_step"],
+            "evaluation_id": evaluation_status["evaluation_id"]
         }
     }
 
@@ -1960,11 +2014,85 @@ async def get_model_versions():
         ]
     }
 
+def evaluate_model_thread(evaluation_id: str, recommendation_feedback):
+    """Separate thread for model evaluation"""
+    global evaluation_status, current_model_instance
+    
+    try:
+        print(f"📊 Starting model evaluation in background thread (ID: {evaluation_id})...")
+        
+        # Update status
+        evaluation_status.update({
+            "is_evaluating": True,
+            "evaluation_id": evaluation_id,
+            "progress": 0,
+            "current_step": "loading_data",
+            "start_time": datetime.now().isoformat(),
+            "evaluation_completed": False,
+            "error": None
+        })
+        
+        print(f"📊 Starting evaluation with {len(recommendation_feedback)} examples...")
+        print(f"📊 Positive examples: {len(recommendation_feedback[recommendation_feedback['source'] == 'recommendation_feedback_positive'])}")
+        print(f"📊 Negative examples: {len(recommendation_feedback[recommendation_feedback['source'] == 'recommendation_feedback_negative'])}")
+        
+        # Check for required columns
+        required_columns = ['user_id', 'item_id', 'current_item_id', 'source', 'label']
+        missing_columns = [col for col in required_columns if col not in recommendation_feedback.columns]
+        if missing_columns:
+            raise Exception(f"Missing required columns: {missing_columns}")
+        
+        # Update status to evaluating
+        evaluation_status["current_step"] = "evaluating"
+        evaluation_status["progress"] = 10
+        
+        print("⚠️ Evaluation may take several minutes due to model inference for each sample...")
+        print("📊 Progress will be shown every 100 samples")
+        
+        # Evaluate model accuracy with negative examples
+        evaluation_results = current_model_instance.evaluate_recommendation_accuracy_with_negatives(recommendation_feedback)
+        
+        if not evaluation_results:
+            raise Exception("Evaluation failed - no results returned.")
+        
+        # Store results
+        evaluation_status["evaluation_results"] = evaluation_results
+        evaluation_status["progress"] = 100
+        evaluation_status["current_step"] = "completed"
+        evaluation_status["evaluation_completed"] = True
+        evaluation_status["completion_time"] = datetime.now().isoformat()
+        
+        print("✅ Model evaluation completed successfully!")
+        
+    except Exception as e:
+        print(f"❌ Evaluation error: {e}")
+        evaluation_status.update({
+            "error": str(e),
+            "current_step": "failed",
+            "evaluation_completed": False,
+            "completion_time": datetime.now().isoformat()
+        })
+        
+        import traceback
+        traceback.print_exc()
+    
+    finally:
+        # ALWAYS reset evaluation status
+        print("🔄 Resetting evaluation status...")
+        evaluation_status["is_evaluating"] = False
+
 @app.get("/model/evaluate-accuracy-with-negatives", tags=["Model"])
 async def evaluate_recommendation_accuracy_with_negatives():
-    """Evaluate model accuracy using recommendation feedback data with negative examples"""
+    """Evaluate model accuracy using recommendation feedback data with negative examples (non-blocking)"""
     if not model_loaded or current_model_instance is None:
         raise HTTPException(status_code=400, detail="No model available in memory. Please train the model first.")
+    
+    # Check if evaluation is already in progress
+    if evaluation_status["is_evaluating"]:
+        raise HTTPException(
+            status_code=400, 
+            detail="Evaluation already in progress. Please wait for current evaluation to complete or check status at /model/evaluation-status"
+        )
     
     try:
         # Load recommendation feedback dataset with negative sampling
@@ -1974,46 +2102,73 @@ async def evaluate_recommendation_accuracy_with_negatives():
         if len(recommendation_feedback) == 0:
             raise HTTPException(status_code=400, detail="No recommendation feedback data available for evaluation.")
         
-        print(f"📊 Starting evaluation with {len(recommendation_feedback)} examples...")
-        print(f"📊 Positive examples: {len(recommendation_feedback[recommendation_feedback['source'] == 'recommendation_feedback_positive'])}")
-        print(f"📊 Negative examples: {len(recommendation_feedback[recommendation_feedback['source'] == 'recommendation_feedback_negative'])}")
+        # Generate evaluation ID
+        evaluation_id = datetime.now().strftime("%Y%m%d_%H%M%S_eval")
         
-        # Debug dataset structure
-        print(f"📊 Dataset columns: {list(recommendation_feedback.columns)}")
-        print(f"📊 Sample data:")
-        print(recommendation_feedback.head(3).to_dict('records'))
-        
-        # Check for required columns
-        required_columns = ['user_id', 'item_id', 'current_item_id', 'source', 'label']
-        missing_columns = [col for col in required_columns if col not in recommendation_feedback.columns]
-        if missing_columns:
-            raise HTTPException(status_code=500, detail=f"Missing required columns: {missing_columns}")
-        
-        # ✅ Add timeout warning
-        print("⚠️ Evaluation may take several minutes due to model inference for each sample...")
-        print("📊 Progress will be shown every 100 samples")
-        
-        # Evaluate model accuracy with negative examples
-        evaluation_results = current_model_instance.evaluate_recommendation_accuracy_with_negatives(recommendation_feedback)
-        
-        if not evaluation_results:
-            raise HTTPException(status_code=500, detail="Evaluation failed - no results returned.")
+        # Start evaluation in separate thread
+        evaluation_thread = threading.Thread(
+            target=evaluate_model_thread,
+            args=(evaluation_id, recommendation_feedback),
+            daemon=True
+        )
+        evaluation_thread.start()
         
         return {
-            "status": "success",
-            "evaluation_results": evaluation_results,
+            "status": "started",
+            "evaluation_id": evaluation_id,
+            "message": f"Model evaluation started in background (ID: {evaluation_id}). Recommendations will continue to work normally.",
             "feedback_data_count": len(recommendation_feedback),
             "positive_examples": len(recommendation_feedback[recommendation_feedback['source'] == 'recommendation_feedback_positive']),
             "negative_examples": len(recommendation_feedback[recommendation_feedback['source'] == 'recommendation_feedback_negative']),
-            "evaluated_at": datetime.now().isoformat(),
-            "note": "Evaluation limited to 1000 samples for performance. Use /model/evaluate-accuracy for full dataset evaluation."
+            "started_at": datetime.now().isoformat(),
+            "non_blocking": True,
+            "check_status_endpoint": "/model/evaluation-status"
         }
         
     except Exception as e:
-        print(f"❌ Error in evaluate-accuracy-with-negatives: {e}")
+        print(f"❌ Error starting evaluation: {e}")
         import traceback
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Error evaluating model accuracy with negative examples: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error starting model evaluation: {str(e)}")
+
+@app.get("/model/evaluation-status", tags=["Model"])
+async def get_evaluation_status():
+    """Get current evaluation status"""
+    return {
+        "is_evaluating": evaluation_status["is_evaluating"],
+        "evaluation_completed": evaluation_status["evaluation_completed"],
+        "completion_time": evaluation_status["completion_time"],
+        "current_step": evaluation_status["current_step"],
+        "evaluation_id": evaluation_status["evaluation_id"],
+        "progress": evaluation_status["progress"],
+        "start_time": evaluation_status["start_time"],
+        "error": evaluation_status["error"],
+        "evaluation_results": evaluation_status["evaluation_results"] if evaluation_status["evaluation_completed"] else None,
+        "non_blocking": True
+    }
+
+@app.get("/model/evaluation-results", tags=["Model"])
+async def get_evaluation_results():
+    """Get latest evaluation results if available"""
+    if not evaluation_status["evaluation_completed"]:
+        raise HTTPException(
+            status_code=400, 
+            detail="No completed evaluation results available. Start evaluation first or check status at /model/evaluation-status"
+        )
+    
+    if evaluation_status["error"]:
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Last evaluation failed: {evaluation_status['error']}"
+        )
+    
+    return {
+        "status": "success",
+        "evaluation_results": evaluation_status["evaluation_results"],
+        "evaluation_id": evaluation_status["evaluation_id"],
+        "completion_time": evaluation_status["completion_time"],
+        "start_time": evaluation_status["start_time"]
+    }
 
 @app.post("/recommendations/with-enhanced-ranking", response_model=RecommendationResponse, tags=["Recommendations"])
 async def get_recommendations_with_enhanced_ranking(request: RecommendationRequest, _request: Request):
@@ -2100,9 +2255,16 @@ async def get_recommendations_with_enhanced_ranking(request: RecommendationReque
 
 @app.get("/model/evaluate-accuracy-quick", tags=["Model"])
 async def evaluate_recommendation_accuracy_quick():
-    """Quick evaluation using small sample for faster results"""
+    """Quick evaluation using small sample for faster results (non-blocking)"""
     if not model_loaded or current_model_instance is None:
         raise HTTPException(status_code=400, detail="No model available in memory. Please train the model first.")
+    
+    # Check if evaluation is already in progress
+    if evaluation_status["is_evaluating"]:
+        raise HTTPException(
+            status_code=400, 
+            detail="Evaluation already in progress. Please wait for current evaluation to complete or check status at /model/evaluation-status"
+        )
     
     try:
         # Load recommendation feedback dataset with negative sampling
@@ -2128,30 +2290,36 @@ async def evaluate_recommendation_accuracy_quick():
         if missing_columns:
             raise HTTPException(status_code=500, detail=f"Missing required columns: {missing_columns}")
         
-        print("📊 Starting quick evaluation...")
+        # Generate evaluation ID
+        evaluation_id = datetime.now().strftime("%Y%m%d_%H%M%S_quick_eval")
         
-        # Evaluate model accuracy with negative examples
-        evaluation_results = current_model_instance.evaluate_recommendation_accuracy_with_negatives(recommendation_feedback)
-        
-        if not evaluation_results:
-            raise HTTPException(status_code=500, detail="Evaluation failed - no results returned.")
+        # Start evaluation in separate thread
+        evaluation_thread = threading.Thread(
+            target=evaluate_model_thread,
+            args=(evaluation_id, recommendation_feedback),
+            daemon=True
+        )
+        evaluation_thread.start()
         
         return {
-            "status": "success",
+            "status": "started",
             "evaluation_type": "quick",
-            "evaluation_results": evaluation_results,
+            "evaluation_id": evaluation_id,
+            "message": f"Quick model evaluation started in background (ID: {evaluation_id}). Recommendations will continue to work normally.",
             "feedback_data_count": len(recommendation_feedback),
             "positive_examples": len(recommendation_feedback[recommendation_feedback['source'] == 'recommendation_feedback_positive']),
             "negative_examples": len(recommendation_feedback[recommendation_feedback['source'] == 'recommendation_feedback_negative']),
-            "evaluated_at": datetime.now().isoformat(),
+            "started_at": datetime.now().isoformat(),
+            "non_blocking": True,
+            "check_status_endpoint": "/model/evaluation-status",
             "note": "Quick evaluation using 100 samples. Use /model/evaluate-accuracy-with-negatives for full evaluation."
         }
         
     except Exception as e:
-        print(f"❌ Error in quick evaluation: {e}")
+        print(f"❌ Error starting quick evaluation: {e}")
         import traceback
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Error in quick evaluation: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error starting quick evaluation: {str(e)}")
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

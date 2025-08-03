@@ -289,6 +289,35 @@ class RecommendationModel:
         
         # Create the ranking model
         self.ranking_model = RankingModel(self.user_model, self.item_model)
+        
+        # Initialize the ranking model with a dummy forward pass to set input shapes
+        try:
+            # Get a sample batch to initialize the model
+            sample_batch = next(iter(ratings_dataset.batch(1)))
+            
+            # Create dummy inputs for model initialization
+            dummy_inputs = {
+                "user_id": tf.constant([sample_batch["user_id"][0].numpy()]),
+                "region": tf.constant([sample_batch["region"][0].numpy()]),
+                "city": tf.constant([sample_batch["city"][0].numpy()]),
+                "item_id_currentview": tf.constant([sample_batch["item_id_currentview"][0].numpy()]),
+                "timestamp_unix": tf.constant([sample_batch["timestamp_unix"][0].numpy()], dtype=tf.int64),
+                "item_id_lastview": tf.constant([sample_batch["item_id_lastview"][0].numpy()]),
+                "item_id": tf.constant([sample_batch["item_id"][0].numpy()]),
+                "category": tf.constant([sample_batch["category"][0].numpy()]),
+                "category2": tf.constant([sample_batch["category2"][0].numpy()]),
+                "category3": tf.constant([sample_batch["category3"][0].numpy()]),
+                "label": tf.constant([sample_batch["label"][0].numpy()], dtype=tf.float32)
+            }
+            
+            # Perform a dummy forward pass to set input shapes
+            _ = self.ranking_model(dummy_inputs, training=False)
+            print("✅ Ranking model initialized with proper input shapes")
+            
+        except Exception as e:
+            print(f"⚠️ Warning: Could not initialize ranking model with dummy pass: {e}")
+            print("💡 Model will be initialized during first training step")
+        
         self.ranking_model.compile(
             optimizer=tf.keras.optimizers.AdamW(
                 weight_decay=0.0001,  # Reduced weight decay
@@ -349,12 +378,14 @@ class RecommendationModel:
                 mode='max',
                 verbose=1
             ),
+            # Use TensorFlow SavedModel format instead of HDF5 for subclassed models
             tf.keras.callbacks.ModelCheckpoint(
-                'best_ranking_model.h5',
+                'best_ranking_model',
                 monitor='metric/ndcg@5',
                 save_best_only=True,
                 mode='max',
-                verbose=1
+                verbose=1,
+                save_format='tf'  # Use TensorFlow SavedModel format
             )
         ]
         
@@ -376,7 +407,7 @@ class RecommendationModel:
                 )
             
             # Print training summary
-            if hasattr(history, 'history'):
+            if history and hasattr(history, 'history') and history.history:
                 print("📊 Training Summary:")
                 if 'metric/ndcg@5' in history.history:
                     ndcg_values = history.history['metric/ndcg@5']
@@ -386,11 +417,22 @@ class RecommendationModel:
                     mrr_values = history.history['metric/mrr@5']
                     print(f"📊 Final MRR@5: {mrr_values[-1]:.4f}")
                     print(f"📊 Best MRR@5: {max(mrr_values):.4f}")
+                if 'metric/ndcg' in history.history:
+                    ndcg_values = history.history['metric/ndcg']
+                    print(f"📊 Final NDCG: {ndcg_values[-1]:.4f}")
+                    print(f"📊 Best NDCG: {max(ndcg_values):.4f}")
+                if 'metric/mrr' in history.history:
+                    mrr_values = history.history['metric/mrr']
+                    print(f"📊 Final MRR: {mrr_values[-1]:.4f}")
+                    print(f"📊 Best MRR: {max(mrr_values):.4f}")
+            else:
+                print("⚠️ No training history available or training failed")
             
             return history
             
         except Exception as e:
             print(f"❌ Training failed: {e}")
+            print("💡 Try reducing batch size or checking dataset format")
             return None
 
 
@@ -457,13 +499,22 @@ class RecommendationModel:
                         )
                     
                     # Print MRR improvement summary
-                    if hasattr(history, 'history') and 'metric/mrr' in history.history:
+                    if history and hasattr(history, 'history') and history.history and 'metric/mrr' in history.history:
                         mrr_values = history.history['metric/mrr']
                         print(f"📊 MRR Improvement Summary:")
                         print(f"📊 Initial MRR: {mrr_values[0]:.4f}")
                         print(f"📊 Final MRR: {mrr_values[-1]:.4f}")
                         print(f"📊 MRR Improvement: {mrr_values[-1] - mrr_values[0]:.4f}")
                         print(f"📊 Best MRR: {max(mrr_values):.4f}")
+                    elif history and hasattr(history, 'history') and history.history and 'metric/ndcg' in history.history:
+                        ndcg_values = history.history['metric/ndcg']
+                        print(f"📊 NDCG Improvement Summary:")
+                        print(f"📊 Initial NDCG: {ndcg_values[0]:.4f}")
+                        print(f"📊 Final NDCG: {ndcg_values[-1]:.4f}")
+                        print(f"📊 NDCG Improvement: {ndcg_values[-1] - ndcg_values[0]:.4f}")
+                        print(f"📊 Best NDCG: {max(ndcg_values):.4f}")
+                    else:
+                        print("⚠️ No training metrics available")
                 else:
                     print("⚠️ Failed to convert enhanced dataset to TensorFlow format")
                     history = self.train_ranking_model(ranking_dataset, test_dataset, epochs)
