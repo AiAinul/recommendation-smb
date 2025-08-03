@@ -67,8 +67,8 @@ class DataProcessor:
         dataset = pd.concat([item_view_selected, item_purchase_selected], ignore_index=True)
         dataset['label'] = np.where(
             dataset.event_name.isin(['purchase']),
-            1.0,
-            0.2,
+            1,
+            0,
         )
         dataset['item_id'] = dataset['item_id'].astype(str).str.strip()
         
@@ -346,44 +346,44 @@ class DataProcessor:
             return None
 
     def calculate_rank_based_label(self, rank: int, max_rank: int = 5) -> float:
-        """Calculate label based on rank position with more aggressive differentiation"""
+        """Calculate label based on rank position optimized for MRR"""
         # Higher rank (lower position) = higher label
-        # More aggressive differentiation to improve MRR
+        # Optimized for MRR improvement
         if rank <= 0:
             return 0.0
         elif rank == 1:
-            return 1.0
+            return 1.0  # Perfect score for top rank
         elif rank == 2:
-            return 0.8  # Increased from 0.707
+            return 0.9  # High score for second rank
         elif rank == 3:
-            return 0.6  # Increased from 0.577
+            return 0.7  # Good score for third rank
         elif rank == 4:
-            return 0.4  # More aggressive drop
+            return 0.5  # Medium score for fourth rank
         elif rank == 5:
-            return 0.2  # More aggressive drop
+            return 0.3  # Lower score for fifth rank
         else:
-            # For ranks > 5, use exponential decay
-            return max(0.05, (1.0 / rank) ** 0.3)  # More aggressive decay
+            # For ranks > 5, use smoother decay for better MRR
+            return max(0.1, (1.0 / rank) ** 0.5)  # Smoother decay
 
     def calculate_correct_prediction(self, rank: int) -> float:
-        """Calculate correct prediction probability based on rank with more aggressive differentiation"""
+        """Calculate correct prediction probability based on rank optimized for MRR"""
         # Higher rank (lower position) = higher probability of being correct
-        # More aggressive differentiation to improve MRR
+        # Optimized for MRR improvement
         if rank <= 0:
             return 0.0
         elif rank == 1:
-            return 1.0
+            return 1.0  # Perfect prediction for top rank
         elif rank == 2:
-            return 0.7  # More aggressive drop from 0.5
+            return 0.8  # High probability for second rank
         elif rank == 3:
-            return 0.4  # More aggressive drop
+            return 0.6  # Good probability for third rank
         elif rank == 4:
-            return 0.2  # More aggressive drop
+            return 0.4  # Medium probability for fourth rank
         elif rank == 5:
-            return 0.1  # More aggressive drop
+            return 0.2  # Lower probability for fifth rank
         else:
-            # For ranks > 5, use more aggressive decay
-            return max(0.05, (1.0 / rank) ** 0.5)
+            # For ranks > 5, use smoother decay for better MRR
+            return max(0.1, (1.0 / rank) ** 0.6)
 
     def analyze_rank_distribution(self, recommendation_dataset: pd.DataFrame) -> Dict:
         """Analyze rank distribution to understand data patterns"""
@@ -407,13 +407,13 @@ class DataProcessor:
         }
 
     def load_recommendation_dataset_with_correct_prediction(self) -> pd.DataFrame:
-        """Load recommendation feedback dataset with correct prediction information and negative sampling"""
+        """Load recommendation feedback dataset with improved negative sampling"""
         if not self.recommendation_dataset_url:
             print("⚠️ RECOMMENDATION_DATASET_URL not set, skipping recommendation dataset")
             return pd.DataFrame()
             
         try:
-            print("📊 Loading recommendation feedback dataset with correct prediction and negative sampling...")
+            print("📊 Loading recommendation feedback dataset with improved negative sampling...")
             recommendation_df = pd.read_csv(self.recommendation_dataset_url)
             
             # Store original count
@@ -479,16 +479,30 @@ class DataProcessor:
                         })
                         positive_examples += 1
                 
-                # Create negative examples (items NOT in recommendation_group)
-                # Sample 2-3 negative examples per positive example
-                negative_sample_size = min(3, len(rec_items) * 2)  # 2x negative samples
+                # IMPROVED: Create balanced negative examples
+                # Sample 1-2 negative examples per positive example (instead of 2-3)
+                negative_sample_size = min(2, len(rec_items))  # Reduced from 3 to 2
                 
                 # Get items that are NOT in recommendation_group
                 available_negative_items = list(all_items - set(rec_items) - {current_item_id})
                 
                 if len(available_negative_items) > 0:
-                    # Randomly sample negative items
+                    # Use stratified sampling for better balance
                     import random
+                    random.seed(42)  # For reproducibility
+                    
+                    # Sample negative items with preference for similar categories
+                    current_item_info = program_studi[program_studi['item_id'] == current_item_id]
+                    if len(current_item_info) > 0:
+                        current_category = current_item_info.iloc[0]['category']
+                        # Prioritize items from different categories for better negative examples
+                        different_category_items = [
+                            item for item in available_negative_items 
+                            if program_studi[program_studi['item_id'] == item].iloc[0]['category'] != current_category
+                        ]
+                        if len(different_category_items) > 0:
+                            available_negative_items = different_category_items
+                    
                     negative_items = random.sample(
                         available_negative_items, 
                         min(negative_sample_size, len(available_negative_items))
@@ -525,12 +539,12 @@ class DataProcessor:
             return pd.DataFrame()
 
     def create_enhanced_training_dataset_with_rank(self, base_dataset: pd.DataFrame, recommendation_dataset: pd.DataFrame = None) -> pd.DataFrame:
-        """Create enhanced training dataset with rank-based labels and negative sampling"""
+        """Create enhanced training dataset with rank-based labels and data augmentation"""
         
         enhanced_dataset = base_dataset.copy()
         
         if recommendation_dataset is not None and len(recommendation_dataset) > 0:
-            print("🔄 Enhancing training dataset with rank-based feedback and negative sampling...")
+            print("🔄 Enhancing training dataset with rank-based feedback and data augmentation...")
             
             # Add recommendation feedback data with rank-based labels
             if 'source' not in enhanced_dataset.columns:
@@ -562,14 +576,43 @@ class DataProcessor:
                         else:
                             label = 1.0  # Default positive label
                         positive_count += 1
+                        
+                        # IMPROVED: Add data augmentation for positive examples
+                        # Create additional positive examples with slight variations
+                        for i in range(2):  # Create 2 additional positive examples
+                            enhanced_rec_data.append({
+                                'user_id': str(row['user_id']),
+                                'item_id': str(item_id),
+                                'current_item_id': str(current_item_id),
+                                'label': label * (0.9 + 0.1 * i),  # Slight variation in label
+                                'rank': rank,
+                                'timestamp': row['timestamp'],
+                                'source': f'{source}_augmented_{i}',
+                                'category': str(item_info.get('category', 'unknown')),
+                                'category2': str(item_info.get('category2', 'unknown')),
+                                'category3': str(item_info.get('category3', 'unknown')),
+                                'current_category': str(current_item_info.get('category', 'unknown')),
+                                'current_category2': str(current_item_info.get('category2', 'unknown')),
+                                'current_category3': str(current_item_info.get('category3', 'unknown')),
+                                'event_name': 'recommendation_feedback',
+                                'item_category': str(item_info.get('category', 'unknown')),
+                                'item_category2': str(item_info.get('category2', 'unknown')),
+                                'item_category3': str(item_info.get('category3', 'unknown')),
+                                'event_country': 'ID',
+                                'event_region': 'unknown',
+                                'region': 'unknown',
+                                'city': 'unknown',
+                                'item_id_lastview': str(current_item_id),
+                                'item_id_currentview': str(current_item_id),
+                                'timestamp_unix': int(row['timestamp'].timestamp()) if hasattr(row['timestamp'], 'timestamp') else 0
+                            })
+                        
                     elif source == 'recommendation_feedback_negative':
                         # Negative example - use negative label
                         label = 0.0  # Negative label
                         negative_count += 1
-                    else:
-                        # Default case
-                        label = 1.0 if rank > 0 else 0.0
                     
+                    # Add original example
                     enhanced_rec_data.append({
                         'user_id': str(row['user_id']),
                         'item_id': str(item_id),
@@ -612,11 +655,12 @@ class DataProcessor:
                 # Combine datasets
                 enhanced_dataset = pd.concat([enhanced_dataset, rec_df], ignore_index=True)
                 
-                print(f"✅ Enhanced dataset with rank-based labels and negative sampling: {len(enhanced_dataset)} total examples")
+                print(f"✅ Enhanced dataset with rank-based labels and data augmentation: {len(enhanced_dataset)} total examples")
                 print(f"📊 Base data: {len(base_dataset)} examples")
                 print(f"📊 Positive feedback examples: {positive_count}")
                 print(f"📊 Negative feedback examples: {negative_count}")
                 print(f"📊 Total feedback examples: {len(rec_df)}")
+                print(f"📊 Data augmentation applied: {positive_count * 2} additional positive examples")
                 
         return enhanced_dataset 
 

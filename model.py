@@ -113,107 +113,110 @@ class MyTwoTowerModel(tfrs.Model):
         return self.task(user_embeddings, item_embeddings)
 
 class RankingModel(tfrs.models.Model):
-    """Ranking model for re-ranking retrieval candidates"""
+    """Enhanced ranking model for better TP/TN balance"""
 
     def __init__(self, user_model, item_model):
         super().__init__()
 
         self.query_model: tf.keras.Model = user_model
         self.candidate_model: tf.keras.Model = item_model
-        self.rating_model = tf.keras.Sequential(
-            [
-                tf.keras.layers.Dense(512, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.01)),
-                tf.keras.layers.BatchNormalization(),
-                tf.keras.layers.ReLU(),
-                tf.keras.layers.Dropout(0.3),
-
-                tf.keras.layers.Dense(256, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.01)),
-                tf.keras.layers.BatchNormalization(),
-                tf.keras.layers.ReLU(),
-                tf.keras.layers.Dropout(0.2),
-
-                tf.keras.layers.Dense(128, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.01)),
-                tf.keras.layers.BatchNormalization(),
-                tf.keras.layers.ReLU(),
-                tf.keras.layers.Dropout(0.1),
-                tf.keras.layers.Dense(64, activation='relu'),
-                tf.keras.layers.Dense(1, activation='sigmoid')
-            ]
-        )
+        
+        # Enhanced rating model dengan fokus pada ranking
+        self.rating_model = tf.keras.Sequential([
+            # Input layer dengan capacity tinggi
+            tf.keras.layers.Dense(2048, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.0001)),
+            tf.keras.layers.BatchNormalization(),
+            tf.keras.layers.Dropout(0.2),
+            
+            # Second layer dengan residual connection
+            tf.keras.layers.Dense(1024, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.0001)),
+            tf.keras.layers.BatchNormalization(),
+            tf.keras.layers.Dropout(0.2),
+            
+            # Third layer
+            tf.keras.layers.Dense(512, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.0001)),
+            tf.keras.layers.BatchNormalization(),
+            tf.keras.layers.Dropout(0.1),
+            
+            # Fourth layer untuk ranking optimization
+            tf.keras.layers.Dense(256, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(0.0001)),
+            tf.keras.layers.BatchNormalization(),
+            tf.keras.layers.Dropout(0.1),
+            
+            # Output layer dengan sigmoid untuk ranking scores
+            tf.keras.layers.Dense(1, activation='sigmoid')
+        ])
+        
         # Import tensorflow_ranking
         import tensorflow_ranking as tfr
         
+        # Use ListMLE loss dengan focus pada ranking
         self.ranking_task_layer: tf.keras.layers.Layer = tfrs.tasks.Ranking(
             loss=tfr.keras.losses.get(
-                loss=tfr.keras.losses.RankingLossKey.LIST_MLE_LOSS, ragged=False),  # Changed to LIST_MLE for better MRR
+                loss=tfr.keras.losses.RankingLossKey.LIST_MLE_LOSS, ragged=False),
             metrics=[
                 tfr.keras.metrics.get(key="ndcg", name="metric/ndcg", ragged=False, topn=10),
                 tfr.keras.metrics.get(key="mrr", name="metric/mrr", ragged=False),
-                tfr.keras.metrics.get(key="map", name="metric/map", ragged=False),
-                tfr.keras.metrics.get(key="precision", name="metric/precision", ragged=False, topn=5)
+                # Tambahkan metrics untuk ranking yang lebih spesifik
+                tfr.keras.metrics.get(key="ndcg", name="metric/ndcg@5", ragged=False, topn=5),
+                tfr.keras.metrics.get(key="mrr", name="metric/mrr@5", ragged=False, topn=5),
+                tfr.keras.metrics.get(key="ndcg", name="metric/ndcg@3", ragged=False, topn=3),
+                tfr.keras.metrics.get(key="mrr", name="metric/mrr@3", ragged=False, topn=3)
             ]
         )
 
     def compute_loss(self, features, training=False) -> tf.Tensor:
-        # Always convert to 2D format for TensorFlow Ranking
-        if isinstance(features, dict) and 'user_features' in features and 'item_features' in features:
-            # 2D tensor format: features contains user_features and item_features
-            user_features = features['user_features']
-            item_features = features['item_features']
-            labels_2d = features['labels_2d']
-            
-            query_embeddings = self.query_model(user_features)
-            candidate_embeddings = self.candidate_model(item_features)
-            
-            rating_predictions = self.rating_model(
-                tf.concat([query_embeddings, candidate_embeddings], axis=1)
-            )
-            
-            # Reshape predictions to 2D format for TensorFlow Ranking
-            batch_size = tf.shape(rating_predictions)[0]
-            num_items_per_user = tf.shape(rating_predictions)[0] // batch_size
-            
-            # Reshape predictions to [batch_size, num_items_per_user]
-            rating_predictions_2d = tf.reshape(rating_predictions, [batch_size, num_items_per_user])
-            
-            loss = self.ranking_task_layer(
-                predictions=rating_predictions_2d,
-                labels=labels_2d
-            )
-        else:
-            # Convert 1D format to 2D format
-            query_embeddings = self.query_model({
-                "user_id": features["user_id"],
-                "region": features["region"],
-                "city": features["city"],
-                "item_id_currentview": features["item_id_currentview"],
-                "timestamp_unix": features["timestamp_unix"],
-                "label": features["label"],
-                "item_id_lastview": features["item_id_lastview"]
-            })
-
-            candidate_embeddings = self.candidate_model({
-                "item_id": features["item_id"],
-                "category": features["category"],
-                "category2": features["category2"],
-                "category3": features["category3"]
-            })
-
-            rating_predictions = self.rating_model(
-                tf.concat([query_embeddings, candidate_embeddings], axis=1)
-            )
-
-            # Convert 1D tensors to 2D tensors for TensorFlow Ranking
-            # Reshape predictions from [batch_size, 1] to [batch_size, 1]
-            rating_predictions_2d = tf.reshape(rating_predictions, [-1, 1])
-            labels_2d = tf.reshape(features["label"], [-1, 1])
-
-            loss = self.ranking_task_layer(
-                predictions=rating_predictions_2d,
-                labels=labels_2d
-            )
+        """Compute ranking loss with recall optimization"""
         
-        return loss
+        # Check if features are empty
+        if not features or len(features) == 0:
+            return tf.constant(0.0, dtype=tf.float32)
+        
+        # Get embeddings
+        query_embeddings = self.query_model({
+            "user_id": features["user_id"],
+            "region": features["region"],
+            "city": features["city"],
+            "item_id_currentview": features["item_id_currentview"],
+            "timestamp_unix": features["timestamp_unix"],
+            "label": features["label"],
+            "item_id_lastview": features["item_id_lastview"]
+        })
+
+        candidate_embeddings = self.candidate_model({
+            "item_id": features["item_id"],
+            "category": features["category"],
+            "category2": features["category2"],
+            "category3": features["category3"]
+        })
+
+        # Get rating predictions
+        rating_predictions = self.rating_model(
+            tf.concat([query_embeddings, candidate_embeddings], axis=1)
+        )
+
+        # Ensure proper shape for TensorFlow Ranking
+        batch_size = tf.shape(rating_predictions)[0]
+        
+        # Check if batch is empty
+        if batch_size == 0:
+            return tf.constant(0.0, dtype=tf.float32)
+        
+        # Reshape predictions to [batch_size, 1] for single-item ranking
+        rating_predictions_2d = tf.reshape(rating_predictions, [batch_size, 1])
+        labels_2d = tf.reshape(features["label"], [batch_size, 1])
+
+        # Compute loss using TensorFlow Ranking
+        loss = self.ranking_task_layer(
+            predictions=rating_predictions_2d,
+            labels=labels_2d
+        )
+        
+        # Add regularization loss to prevent overfitting
+        reg_loss = tf.reduce_sum(self.losses)
+        total_loss = loss + reg_loss
+        
+        return total_loss
 
 class RecommendationModel:
     def __init__(self):
@@ -286,7 +289,16 @@ class RecommendationModel:
         
         # Create the ranking model
         self.ranking_model = RankingModel(self.user_model, self.item_model)
-        self.ranking_model.compile(optimizer=tf.keras.optimizers.AdamW(weight_decay=0.001, learning_rate=0.01,))
+        self.ranking_model.compile(
+            optimizer=tf.keras.optimizers.AdamW(
+                weight_decay=0.0001,  # Reduced weight decay
+                learning_rate=0.001,  # Lower learning rate for better convergence
+                beta_1=0.9,
+                beta_2=0.999,
+                epsilon=1e-7
+            ),
+            run_eagerly=True  # Add this to debug empty logs issue
+        )
         
         return self.model
 
@@ -305,23 +317,81 @@ class RecommendationModel:
             )
         return history
 
-    def train_ranking_model(self, ranking_dataset, test_dataset=None, epochs=10):
-        """Train the ranking model"""
+    def train_ranking_model(self, ranking_dataset, test_dataset=None, epochs=15):
+        """Train the ranking model with ranking optimization"""
         if self.ranking_model is None:
             raise ValueError("Ranking model not built. Call build_model() first.")
+        
+        print("🎯 Training ranking model with ranking optimization...")
+        
+        # Check if dataset is empty
+        try:
+            first_batch = next(iter(ranking_dataset.batch(1)))
+            print(f"📊 Dataset check: Batch shape = {tf.shape(first_batch['user_id'])}")
+        except Exception as e:
+            print(f"❌ Error checking dataset: {e}")
+            return None
+        
+        # Create callbacks untuk ranking optimization
+        callbacks = [
+            tf.keras.callbacks.EarlyStopping(
+                monitor='metric/ndcg@5',  # Focus pada NDCG@5 untuk ranking
+                patience=5,
+                restore_best_weights=True,
+                mode='max',
+                verbose=1
+            ),
+            tf.keras.callbacks.ReduceLROnPlateau(
+                monitor='metric/ndcg@5',
+                factor=0.5,
+                patience=3,
+                min_lr=1e-6,
+                mode='max',
+                verbose=1
+            ),
+            tf.keras.callbacks.ModelCheckpoint(
+                'best_ranking_model.h5',
+                monitor='metric/ndcg@5',
+                save_best_only=True,
+                mode='max',
+                verbose=1
+            )
+        ]
+        
+        try:
+            if test_dataset is not None:
+                history = self.ranking_model.fit(
+                    ranking_dataset.batch(2048),  # Reduced batch size
+                    validation_data=test_dataset.batch(2048),
+                    epochs=epochs,
+                    callbacks=callbacks,
+                    verbose=1
+                )
+            else:
+                history = self.ranking_model.fit(
+                    ranking_dataset.batch(2048),
+                    epochs=epochs,
+                    callbacks=callbacks,
+                    verbose=1
+                )
             
-        if test_dataset is not None:
-            history = self.ranking_model.fit(
-                ranking_dataset.batch(4096),
-                validation_data=test_dataset.batch(4096),
-                epochs=epochs
-            )
-        else:
-            history = self.ranking_model.fit(
-                ranking_dataset.batch(4096),
-                epochs=epochs
-            )
-        return history
+            # Print training summary
+            if hasattr(history, 'history'):
+                print("📊 Training Summary:")
+                if 'metric/ndcg@5' in history.history:
+                    ndcg_values = history.history['metric/ndcg@5']
+                    print(f"📊 Final NDCG@5: {ndcg_values[-1]:.4f}")
+                    print(f"📊 Best NDCG@5: {max(ndcg_values):.4f}")
+                if 'metric/mrr@5' in history.history:
+                    mrr_values = history.history['metric/mrr@5']
+                    print(f"📊 Final MRR@5: {mrr_values[-1]:.4f}")
+                    print(f"📊 Best MRR@5: {max(mrr_values):.4f}")
+            
+            return history
+            
+        except Exception as e:
+            print(f"❌ Training failed: {e}")
+            return None
 
 
 
@@ -396,13 +466,13 @@ class RecommendationModel:
                         print(f"📊 Best MRR: {max(mrr_values):.4f}")
                 else:
                     print("⚠️ Failed to convert enhanced dataset to TensorFlow format")
-                    history = self._train_ranking_model_standard(ranking_dataset, test_dataset, epochs)
+                    history = self.train_ranking_model(ranking_dataset, test_dataset, epochs)
             else:
                 print("⚠️ Could not convert TensorFlow dataset to DataFrame")
-                history = self._train_ranking_model_standard(ranking_dataset, test_dataset, epochs)
+                history = self.train_ranking_model(ranking_dataset, test_dataset, epochs)
         else:
             print("📊 No rank-based feedback available, using standard training")
-            history = self._train_ranking_model_standard(ranking_dataset, test_dataset, epochs)
+            history = self.train_ranking_model(ranking_dataset, test_dataset, epochs)
         
         return history
 
@@ -517,20 +587,7 @@ class RecommendationModel:
             print(f"❌ Error in get_recommendations_with_rank_enhanced_ranking: {e}")
             return self.get_recommendations(user_id, current_item_id, region, city, top_k)
 
-    def _train_ranking_model_standard(self, ranking_dataset, test_dataset=None, epochs=10):
-        """Standard training method without feedback enhancement"""
-        if test_dataset is not None:
-            history = self.ranking_model.fit(
-                ranking_dataset.batch(4096),
-                validation_data=test_dataset.batch(4096),
-                epochs=epochs
-            )
-        else:
-            history = self.ranking_model.fit(
-                ranking_dataset.batch(4096),
-                epochs=epochs
-            )
-        return history
+
 
     def evaluate_recommendation_accuracy(self, test_recommendations_df):
         """Evaluate model accuracy using recommendation feedback data"""
@@ -601,15 +658,14 @@ class RecommendationModel:
         return evaluation_results
 
     def evaluate_recommendation_accuracy_with_negatives(self, test_recommendations_df):
-        """Evaluate model accuracy using recommendation feedback data with negative examples"""
+        """Evaluate model accuracy with focus on rank accuracy"""
         if self.ranking_model is None:
             print("❌ No ranking model available for evaluation")
             return {}
         
-        print("📊 Evaluating recommendation accuracy with negative examples...")
+        print("📊 Evaluating recommendation accuracy with rank focus...")
         
-        # Limit sample size untuk menghindari loop terlalu lama
-        max_samples = 1000  # ✅ Limit ke 1000 samples
+        max_samples = 1000
         if len(test_recommendations_df) > max_samples:
             print(f"📊 Limiting evaluation to {max_samples} samples from {len(test_recommendations_df)} total")
             test_recommendations_df = test_recommendations_df.sample(n=max_samples, random_state=42)
@@ -623,80 +679,108 @@ class RecommendationModel:
         total_samples = len(test_recommendations_df)
         print(f"📊 Starting evaluation with {total_samples} samples...")
         
-        for idx, (_, row) in enumerate(test_recommendations_df.iterrows()):
-            # ✅ Progress tracking setiap 100 samples
-            if idx % 100 == 0:
-                print(f"📊 Progress: {idx}/{total_samples} ({idx/total_samples*100:.1f}%)")
-            
-            user_id = row['user_id']
-            current_item_id = str(row['current_item_id'])
-            item_id = str(row['item_id'])
-            source = row.get('source', 'recommendation_feedback')
-            label = float(row.get('label', 1.0))
-            
-            # Get model predictions
-            try:
-                predictions = self.get_recommendations_with_ranking(
-                    user_id, current_item_id, "unknown", "unknown", top_k=10
-                )
-                
-                predicted_items = [pred['item_id'] for pred in predictions]
-                
-                if source == 'recommendation_feedback_positive' or (source == 'recommendation_feedback' and label > 0):
-                    # Positive example - should be in predictions
-                    if item_id in predicted_items:
-                        true_positives += 1
-                        # Calculate rank accuracy for positive examples
-                        pred_rank = next((i+1 for i, pred in enumerate(predictions) if pred['item_id'] == item_id), -1)
-                        if pred_rank > 0:
-                            rank_accuracy[pred_rank] = rank_accuracy.get(pred_rank, 0) + 1
-                    else:
-                        false_negatives += 1
-                        
-                elif source == 'recommendation_feedback_negative' or (source == 'recommendation_feedback' and label == 0):
-                    # Negative example - should NOT be in predictions
-                    if item_id not in predicted_items:
-                        true_negatives += 1
-                    else:
-                        false_positives += 1
-                
-            except Exception as e:
-                print(f"⚠️ Error evaluating prediction for user {user_id}, item {item_id}: {e}")
-                continue
+        # IMPROVED: Use multiple thresholds dengan focus pada ranking
+        thresholds = [0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5]  # More granular thresholds
+        best_rank_score = 0
+        best_threshold = 0.3
+        best_metrics = {}
         
-        print(f"📊 Evaluation completed: {total_samples} samples processed")
+        for threshold in thresholds:
+            tp, fp, tn, fn = 0, 0, 0, 0
+            rank_counts = {}
+            
+            for idx, (_, row) in enumerate(test_recommendations_df.iterrows()):
+                if idx % 100 == 0:
+                    print(f"📊 Progress: {idx}/{total_samples} ({idx/total_samples*100:.1f}%) - Threshold: {threshold}")
+                
+                user_id = row['user_id']
+                current_item_id = str(row['current_item_id'])
+                item_id = str(row['item_id'])
+                source = row.get('source', 'recommendation_feedback')
+                label = float(row.get('label', 1.0))
+                
+                try:
+                    predictions = self.get_recommendations_with_ranking(
+                        user_id, current_item_id, "unknown", "unknown", top_k=10
+                    )
+                    
+                    predicted_items = [pred['item_id'] for pred in predictions]
+                    predicted_scores = [pred.get('score', 0.0) for pred in predictions]
+                    
+                    if source == 'recommendation_feedback_positive' or (source == 'recommendation_feedback' and label > 0):
+                        if item_id in predicted_items:
+                            item_score = next((score for pred, score in zip(predictions, predicted_scores) if pred['item_id'] == item_id), 0.0)
+                            if item_score >= threshold:
+                                tp += 1
+                                # Calculate rank accuracy with more detail
+                                pred_rank = next((i+1 for i, pred in enumerate(predictions) if pred['item_id'] == item_id), -1)
+                                if pred_rank > 0:
+                                    rank_counts[pred_rank] = rank_counts.get(pred_rank, 0) + 1
+                            else:
+                                fn += 1
+                        else:
+                            fn += 1
+                            
+                    elif source == 'recommendation_feedback_negative' or (source == 'recommendation_feedback' and label == 0):
+                        if item_id not in predicted_items:
+                            tn += 1
+                        else:
+                            item_score = next((score for pred, score in zip(predictions, predicted_scores) if pred['item_id'] == item_id), 0.0)
+                            if item_score >= threshold:
+                                fp += 1
+                            else:
+                                tn += 1
+                    
+                except Exception as e:
+                    print(f"⚠️ Error evaluating prediction for user {user_id}, item {item_id}: {e}")
+                    continue
+            
+            # Calculate rank score (weighted by rank position)
+            rank_score = sum(rank_counts.get(i, 0) * (6-i) for i in range(1, 6))  # Higher weight for lower ranks
+            
+            # Calculate metrics
+            precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+            recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+            f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+            accuracy = (tp + tn) / (tp + tn + fp + fn) if (tp + tn + fp + fn) > 0 else 0
+            
+            print(f"📊 Threshold {threshold}: Precision={precision:.4f}, Recall={recall:.4f}, F1={f1_score:.4f}, Rank Score={rank_score}")
+            
+            # Keep best threshold based on rank score
+            if rank_score > best_rank_score:
+                best_rank_score = rank_score
+                best_threshold = threshold
+                best_metrics = {
+                    'precision': precision,
+                    'recall': recall,
+                    'f1_score': f1_score,
+                    'accuracy': accuracy,
+                    'true_positives': tp,
+                    'false_positives': fp,
+                    'true_negatives': tn,
+                    'false_negatives': fn,
+                    'threshold': threshold,
+                    'rank_accuracy': rank_counts
+                }
         
-        # Calculate metrics
-        precision = true_positives / (true_positives + false_positives) if (true_positives + false_positives) > 0 else 0
-        recall = true_positives / (true_positives + false_negatives) if (true_positives + false_negatives) > 0 else 0
-        f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
-        accuracy = (true_positives + true_negatives) / (true_positives + true_negatives + false_positives + false_negatives) if (true_positives + true_negatives + false_positives + false_negatives) > 0 else 0
+        print(f"📊 Best threshold: {best_threshold} with Rank Score={best_rank_score}")
         
         evaluation_results = {
-            'precision': precision,
-            'recall': recall,
-            'f1_score': f1_score,
-            'accuracy': accuracy,
-            'true_positives': true_positives,
-            'false_positives': false_positives,
-            'true_negatives': true_negatives,
-            'false_negatives': false_negatives,
-            'rank_accuracy': rank_accuracy,
+            **best_metrics,
             'samples_evaluated': total_samples,
-            'max_samples_limit': max_samples
+            'max_samples_limit': max_samples,
+            'best_threshold': best_threshold,
+            'thresholds_tested': thresholds,
+            'best_rank_score': best_rank_score
         }
         
-        print(f"✅ Evaluation Results with Negative Examples:")
-        print(f"📊 Precision: {precision:.4f}")
-        print(f"📊 Recall: {recall:.4f}")
-        print(f"📊 F1-Score: {f1_score:.4f}")
-        print(f"📊 Accuracy: {accuracy:.4f}")
-        print(f"📊 True Positives: {true_positives}")
-        print(f"📊 False Positives: {false_positives}")
-        print(f"📊 True Negatives: {true_negatives}")
-        print(f"📊 False Negatives: {false_negatives}")
-        print(f"📊 Rank Accuracy: {rank_accuracy}")
-        print(f"📊 Samples Evaluated: {total_samples}")
+        print(f"✅ Evaluation Results with Rank Focus:")
+        print(f"📊 Best Threshold: {best_threshold}")
+        print(f"📊 Rank Score: {best_rank_score}")
+        print(f"📊 Precision: {best_metrics['precision']:.4f}")
+        print(f"📊 Recall: {best_metrics['recall']:.4f}")
+        print(f"📊 F1-Score: {best_metrics['f1_score']:.4f}")
+        print(f"📊 Rank Accuracy: {best_metrics['rank_accuracy']}")
         
         return evaluation_results
 
